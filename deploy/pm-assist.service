@@ -1,0 +1,16 @@
+[Unit]
+Description=PM Assist Feishu Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/pm-assist
+ExecStart=/opt/pm-assist/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
