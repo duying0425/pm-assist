@@ -45,7 +45,7 @@ async def chat(history: list[dict], knowledge: str, risks: str = "") -> str:
 
     response = await _client.chat.completions.create(
         model=AI_MODEL,
-        max_tokens=1500,
+        max_tokens=4000,
         messages=[{"role": "system", "content": system}] + history,
     )
     return response.choices[0].message.content
@@ -60,9 +60,22 @@ _EXTRACT_PROMPT = """你是一个信息提取助手。分析下面这段项目�
 - team: 人员分工、联系人、职责
 - client: 客户相关信息（需求、态度、要求）
 
+拆分规则（重要）：
+- 每个独立事项必须单独一条，发现几个就输出几条，绝不合并
+- 同一条消息中的多个风险、多个里程碑节点、多个人员各自独立
+- 每条 content 只描述一件事，不超过60字
+
+示例：
+消息："张工说BSP SDK还没验证好，测试环境也没搭，预计5月底完成集成测试"
+输出：{"has_facts": true, "items": [
+  {"type": "risk", "content": "BSP SDK验证未完成，可能影响后续进度"},
+  {"type": "risk", "content": "测试环境尚未搭建"},
+  {"type": "milestone", "content": "集成测试预计5月底完成"}
+]}
+
 返回格式（仅返回JSON，不要其他内容）：
 无内容时：{"has_facts": false}
-有内容时：{"has_facts": true, "items": [{"type": "risk", "content": "简洁一句话描述"}]}
+有内容时：{"has_facts": true, "items": [{"type": "risk", "content": "..."}]}
 
 用户消息：
 """
@@ -72,7 +85,7 @@ async def extract_facts(text: str) -> list[dict]:
     try:
         response = await _client.chat.completions.create(
             model=AI_MODEL,
-            max_tokens=400,
+            max_tokens=800,
             messages=[{"role": "user", "content": _EXTRACT_PROMPT + text}],
         )
         import json

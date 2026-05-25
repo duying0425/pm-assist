@@ -8,10 +8,16 @@ FEISHU_BASE = "https://open.feishu.cn/open-apis"
 
 _TYPE_LABELS = {
     "risk": "风险",
+    "issue": "问题",
+    "blocker": "阻塞",
+    "dependency": "依赖",
     "milestone": "里程碑",
     "decision": "决策",
     "team": "人员",
-    "client": "客户信息",
+    "client": "客户",
+    "org": "组织",
+    "process": "流程",
+    "knowledge": "知识",
 }
 
 
@@ -31,35 +37,27 @@ async def get_tenant_token(app_id: str, app_secret: str) -> str:
 
 async def send_text_to_user(open_id: str, text: str, app_id: str, app_secret: str):
     token = await get_tenant_token(app_id, app_secret)
-    chunks = _split(text, 4000)
     async with httpx.AsyncClient() as client:
-        for chunk in chunks:
+        for chunk in _split(text, 4000):
             await client.post(
                 f"{FEISHU_BASE}/im/v1/messages",
                 headers={"Authorization": f"Bearer {token}"},
                 params={"receive_id_type": "open_id"},
-                json={
-                    "receive_id": open_id,
-                    "msg_type": "text",
-                    "content": json.dumps({"text": chunk}),
-                },
+                json={"receive_id": open_id, "msg_type": "text",
+                      "content": json.dumps({"text": chunk})},
             )
 
 
 async def send_text(chat_id: str, text: str, app_id: str, app_secret: str):
     token = await get_tenant_token(app_id, app_secret)
-    chunks = _split(text, 4000)
     async with httpx.AsyncClient() as client:
-        for chunk in chunks:
+        for chunk in _split(text, 4000):
             await client.post(
                 f"{FEISHU_BASE}/im/v1/messages",
                 headers={"Authorization": f"Bearer {token}"},
                 params={"receive_id_type": "chat_id"},
-                json={
-                    "receive_id": chat_id,
-                    "msg_type": "text",
-                    "content": json.dumps({"text": chunk}),
-                },
+                json={"receive_id": chat_id, "msg_type": "text",
+                      "content": json.dumps({"text": chunk})},
             )
 
 
@@ -71,19 +69,32 @@ async def send_confirm_card(chat_id: str, items: list[dict], app_id: str, app_se
             f"{FEISHU_BASE}/im/v1/messages",
             headers={"Authorization": f"Bearer {token}"},
             params={"receive_id_type": "chat_id"},
-            json={
-                "receive_id": chat_id,
-                "msg_type": "interactive",
-                "content": json.dumps(card),
-            },
+            json={"receive_id": chat_id, "msg_type": "interactive",
+                  "content": json.dumps(card)},
         )
 
 
 def _build_confirm_card(items: list[dict], chat_id: str) -> dict:
+    has_update = any(item.get("action") == "update" for item in items)
     elements = []
     for i, item in enumerate(items[:10]):
         label = _TYPE_LABELS.get(item["type"], item["type"])
-        display = item["content"] if len(item["content"]) <= 60 else item["content"][:57] + "…"
+        content = item["content"]
+        display = content if len(content) <= 55 else content[:52] + "…"
+
+        action = item.get("action", "new")
+        if action == "update":
+            fact_id = item.get("fact_id", "")
+            fact_title = item.get("fact_title", "")
+            short_title = fact_title[:18] + "…" if len(fact_title) > 18 else fact_title
+            note = f"*→ 追加到 #{fact_id}《{short_title}》*"
+            btn_text = f"追加 #{fact_id}"
+            btn_type = "default"
+        else:
+            note = "*→ 新增条目*"
+            btn_text = "新增"
+            btn_type = "primary"
+
         elements.append({
             "tag": "column_set",
             "flex_mode": "none",
@@ -94,7 +105,10 @@ def _build_confirm_card(items: list[dict], chat_id: str) -> dict:
                     "weight": 5,
                     "elements": [{
                         "tag": "div",
-                        "text": {"tag": "lark_md", "content": f"**{i + 1}. [{label}]** {display}"},
+                        "text": {
+                            "tag": "lark_md",
+                            "content": f"**{i + 1}. [{label}]** {display}\n{note}",
+                        },
                     }],
                 },
                 {
@@ -103,13 +117,15 @@ def _build_confirm_card(items: list[dict], chat_id: str) -> dict:
                     "weight": 1,
                     "elements": [{
                         "tag": "button",
-                        "text": {"tag": "plain_text", "content": "保存"},
-                        "type": "primary",
+                        "text": {"tag": "plain_text", "content": btn_text},
+                        "type": btn_type,
                         "value": {"action": "save_one", "chat_id": chat_id, "index": i},
                     }],
                 },
             ],
         })
+
+    title_text = "💡 发现可更新/记录信息" if has_update else "💡 发现可记录信息"
     elements.extend([
         {"tag": "hr"},
         {
@@ -133,7 +149,7 @@ def _build_confirm_card(items: list[dict], chat_id: str) -> dict:
     return {
         "config": {"wide_screen_mode": True, "enable_forward": False},
         "header": {
-            "title": {"tag": "plain_text", "content": "💡 发现可记录信息"},
+            "title": {"tag": "plain_text", "content": title_text},
             "template": "blue",
         },
         "elements": elements,
@@ -147,15 +163,11 @@ def card_saved_response(count: int) -> dict:
             "type": "raw",
             "data": {
                 "config": {"enable_forward": False},
-                "elements": [
-                    {
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"✅ 已保存 {count} 条信息，后续回答将参考。",
-                        },
-                    }
-                ],
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md",
+                             "content": f"✅ 已保存 {count} 条，后续回答将参考。"},
+                }],
             },
         },
     }
@@ -163,9 +175,11 @@ def card_saved_response(count: int) -> dict:
 
 def card_one_saved_response(saved: dict, remaining: list[dict], chat_id: str) -> dict:
     label = _TYPE_LABELS.get(saved["type"], saved["type"])
+    action = saved.get("action", "new")
+    verb = f"已追加到 #{saved.get('fact_id')}" if action == "update" else "已新增"
     updated = _build_confirm_card(remaining, chat_id)
     return {
-        "toast": {"type": "success", "content": f"已保存：{label}"},
+        "toast": {"type": "success", "content": f"{verb}：[{label}]"},
         "card": {"type": "raw", "data": updated},
     }
 
@@ -177,12 +191,10 @@ def card_skipped_response() -> dict:
             "type": "raw",
             "data": {
                 "config": {"enable_forward": False},
-                "elements": [
-                    {
-                        "tag": "div",
-                        "text": {"tag": "lark_md", "content": "⏭ 已跳过。"},
-                    }
-                ],
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": "⏭ 已跳过。"},
+                }],
             },
         },
     }

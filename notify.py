@@ -12,12 +12,7 @@ load_dotenv(Path(__file__).parent / ".env")
 
 import db
 import feishu
-from config import FEISHU_APP_ID, FEISHU_APP_SECRET
-
-# 接收通知的用户列表（open_id）
-NOTIFY_USERS = [
-    "ou_6373ec8f094be9c36823255d75f9ef11",  # 佟海鹏
-]
+from config import ADMIN_OPEN_IDS, NOTIFY_OPEN_IDS, FEISHU_APP_ID, FEISHU_APP_SECRET
 
 _TYPE_ZH = {"risk": "风险", "issue": "问题", "blocker": "阻塞项", "dependency": "依赖"}
 
@@ -40,7 +35,7 @@ def build_report() -> str:
         typ = _TYPE_ZH.get(r["type"], r["type"])
         owner = f"（{r['owner']}）" if r["owner"] else ""
         due = f" ⏰{r['due_date']}" if r["due_date"] else ""
-        return f"  R{r['id']} [{typ}] {r['title']}{owner}{due}"
+        return f"  #{r['id']} [{typ}] {r['title']}{owner}{due}"
 
     if high:
         lines.append(f"🔴 高优先级 · {len(high)} 条")
@@ -59,7 +54,11 @@ def build_report() -> str:
 async def main():
     report = build_report()
     print(f"[{datetime.now():%Y-%m-%d %H:%M}] 发送日报：\n{report}\n")
-    for uid in NOTIFY_USERS:
+    recipients = NOTIFY_OPEN_IDS | ADMIN_OPEN_IDS
+    if not recipients:
+        print("  ⚠ NOTIFY_OPEN_IDS 和 ADMIN_OPEN_IDS 均未配置，无人接收")
+        return
+    for uid in recipients:
         await feishu.send_text_to_user(uid, report, FEISHU_APP_ID, FEISHU_APP_SECRET)
         print(f"  → 已发送至 {uid}")
 

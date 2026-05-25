@@ -12,4 +12,5 @@ OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://router.tmhcorps.
 AI_MODEL = os.getenv("AI_MODEL", "anthropic/claude-sonnet-4-5")
 
 ADMIN_OPEN_IDS = set(filter(None, os.getenv("ADMIN_OPEN_IDS", "").split(",")))
-MAX_HISTORY = int(os.getenv("MAX_HISTORY", "10"))
+NOTIFY_OPEN_IDS = set(filter(None, os.getenv("NOTIFY_OPEN_IDS", "").split(",")))
+MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
