@@ -1,9 +1,10 @@
 """
-每日风险/问题通知脚本
-由 crontab 调用：0 9 * * 1-5 cd ~/pm-assist && venv/bin/python notify.py >> logs/notify.log 2>&1
+每日早报模块。
+可作为独立脚本由 crontab 调用：
+  0 9 * * 1-5 cd ~/pm-assist && venv/bin/python notify.py >> logs/notify.log 2>&1
+也可由 main.py 的 APScheduler 直接调用（推荐，已内置）。
 """
 import asyncio
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from config import ADMIN_OPEN_IDS, NOTIFY_OPEN_IDS, FEISHU_APP_ID, FEISHU_APP_SE
 _TYPE_ZH = {"risk": "风险", "issue": "问题", "blocker": "阻塞项", "dependency": "依赖"}
 
 
-def build_report() -> str:
+def build_risk_section() -> str:
     db.init_db()
     risks = db.list_risks(status="open")
     today = datetime.now().strftime("%m月%d日")
@@ -51,8 +52,18 @@ def build_report() -> str:
     return "\n".join(lines)
 
 
+def build_morning_report(review: str | None = None) -> str:
+    """组合风险摘要 + AI洗盘决策报告。"""
+    parts = [build_risk_section()]
+    if review:
+        divider = "─" * 24
+        parts.append(f"\n\n🤖 AI数据洗盘·决策报告\n{divider}\n{review}")
+    return "".join(parts)
+
+
 async def main():
-    report = build_report()
+    review = db.get_latest_nightly_review()
+    report = build_morning_report(review)
     print(f"[{datetime.now():%Y-%m-%d %H:%M}] 发送日报：\n{report}\n")
     recipients = NOTIFY_OPEN_IDS | ADMIN_OPEN_IDS
     if not recipients:

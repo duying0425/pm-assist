@@ -220,7 +220,7 @@ def delete_fact(fact_id: int):
 
 def list_facts(type_: str | None = None, status: str | None = "active",
                project: str | None = None) -> list:
-    clauses, params = [], []
+    clauses, params = ["type != 'report'"], []  # report 是系统内部类型，不对外展示
     if type_:
         clauses.append("type=?")
         params.append(type_)
@@ -266,7 +266,7 @@ def get_knowledge_text() -> str:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT title, body FROM facts WHERE status='active'"
-            " AND type NOT IN ('risk','issue','blocker','dependency')"
+            " AND type NOT IN ('risk','issue','blocker','dependency','report')"
             " ORDER BY type, id"
         ).fetchall()
     if not rows:
@@ -410,6 +410,55 @@ def get_pending(chat_id: str) -> list[dict]:
 def clear_pending(chat_id: str):
     with get_conn() as conn:
         conn.execute("DELETE FROM pending_notes WHERE chat_id=?", (chat_id,))
+
+
+def save_nightly_review(content: str) -> int:
+    today = datetime.now().strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO facts(type,title,body,status,project,source)"
+            " VALUES(?,?,?,?,?,?)",
+            ("report", f"AI数据洗盘 {today}", content, "active", "system", "ai"),
+        )
+        return cur.lastrowid
+
+
+def get_latest_nightly_review() -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT body FROM facts WHERE type='report' AND project='system'"
+            " ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return row["body"] if row else None
+
+
+def get_all_facts_for_review() -> str:
+    """返回所有 active 非报告条目的摘要文本，供 AI 洗盘分析。"""
+    _TYPE_ZH = {
+        "risk": "风险", "issue": "问题", "blocker": "阻塞", "dependency": "依赖",
+        "milestone": "里程碑", "decision": "决策", "team": "人员",
+        "client": "客户", "org": "组织", "process": "流程", "knowledge": "知识",
+    }
+    _PRIO_ZH = {"high": "高", "medium": "中", "low": "低"}
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, type, title, body, priority, owner, due_date, updated_at"
+            " FROM facts WHERE status='active' AND type != 'report' ORDER BY type, id"
+        ).fetchall()
+    if not rows:
+        return ""
+    lines = []
+    for r in rows:
+        type_label = _TYPE_ZH.get(r["type"], r["type"])
+        prio = f" 优先级:{_PRIO_ZH.get(r['priority'], r['priority'])}" if r["priority"] else ""
+        owner = f" 负责人:{r['owner']}" if r["owner"] else ""
+        due = f" 截止:{r['due_date']}" if r["due_date"] else ""
+        updated = r["updated_at"][:10] if r["updated_at"] else "未知"
+        lines.append(f"#{r['id']} [{type_label}]{prio}{owner}{due} 最后更新:{updated}")
+        lines.append(f"  标题: {r['title']}")
+        lines.append(f"  正文: {r['body'][:200]}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def pop_pending_item(chat_id: str, index: int) -> tuple[dict | None, list[dict]]:

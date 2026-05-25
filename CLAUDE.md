@@ -19,7 +19,7 @@
 - 公网地址：`https://pm.tmhcorps.cn`（Cloudflare 代理 HTTP→HTTPS）
 - nginx 配置：`/etc/nginx/conf.d/apps.conf`（与 chat.tmhcorps.cn 共用）
 - 飞书 Webhook：`https://pm.tmhcorps.cn/webhook/feishu`
-- .env 位置：`~/pm-assist/.env`（含 FEISHU_APP_ID/SECRET/TOKEN、OPENROUTER_API_KEY、ADMIN_OPEN_IDS、NOTIFY_OPEN_IDS）
+- .env 位置：`~/pm-assist/.env`（含 FEISHU_APP_ID/SECRET/TOKEN、OPENROUTER_API_KEY、ADMIN_OPEN_IDS、NOTIFY_OPEN_IDS、PRIMARY_ADMIN_OPEN_ID）
 
 ## AI 调用规范
 **必须用 OpenRouter 兼容接口，不得使用 anthropic 包。**
@@ -38,11 +38,11 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 ```
 pm-assist/
 ├── main.py          # FastAPI 主入口，Webhook 处理，管理员命令，卡片回调
-├── claude_client.py # AI 对话(chat) + 关键信息提取(extract_facts)
+├── claude_client.py # AI 对话(chat) + 关键信息提取(extract_facts) + 夜间洗盘(nightly_review)
 ├── feishu.py        # 飞书 API：发文本、发交互卡片、卡片响应格式
 ├── db.py            # SQLite CRUD：facts 表 + 所有业务逻辑
 ├── config.py        # 环境变量加载（从 .env 读取）
-├── notify.py        # 消息推送相关
+├── notify.py        # 消息推送：build_risk_section() + build_morning_report(review)
 ├── seed.py          # 初始知识库数据（已执行，勿重复执行）
 ├── seed_yadi.py     # 雅迪项目初始数据（已执行，勿重复执行）
 ├── deploy/
@@ -76,6 +76,7 @@ updated_at  TEXT    -- 本地时间，每次更新自动刷新
 - `risk / issue / blocker / dependency`：可追踪的项目风险与问题（进风险清单）
 - `milestone / decision`：可追踪的里程碑与决策（进风险清单）
 - `org / process / client / knowledge / team`：参考知识（进知识库）
+- `report`：系统内部类型，凌晨 AI 洗盘结果（project=system），不出现在 list/AI上下文中
 
 **迁移说明**：首次 `init_db()` 自动将旧 `knowledge_blocks` + `risks` 迁移到 `facts`，幂等，旧表保留。
 
@@ -89,10 +90,13 @@ updated_at  TEXT    -- 本地时间，每次更新自动刷新
 - `update_fact(id, **kwargs)` → 更新任意字段（status/owner/priority/due_date/title/body）
 - `append_to_fact(id, addition)` → 在 body 末尾追加带时间戳的更新（保留历史）
 - `find_similar_fact(type_, content)` → 关键词重叠匹配，用于 AI 提取时去重
-- `get_knowledge_text()` → 拼装非风险类 active 条目给 AI（知识库部分）
+- `get_knowledge_text()` → 拼装非风险类 active 条目给 AI（知识库部分，已排除 report）
 - `get_risks_text()` → 拼装 risk/issue/blocker/dependency active 条目给 AI
-- `list_facts(type_, status, project)` → 按条件列出条目
+- `list_facts(type_, status, project)` → 按条件列出条目（自动排除 report 系统类型）
 - `pop_pending_item(chat_id, index)` → 弹出单条待确认项
+- `save_nightly_review(content)` → 存入 AI 洗盘报告（type=report, project=system）
+- `get_latest_nightly_review()` → 取最新洗盘报告正文
+- `get_all_facts_for_review()` → 返回所有 active 非 report 条目摘要，供 AI 洗盘分析
 
 ## 已实现功能
 1. **飞书 Bot 对话**：@Bot 发消息，结合知识库+风险清单+对话历史用 AI 回答
@@ -104,6 +108,7 @@ updated_at  TEXT    -- 本地时间，每次更新自动刷新
 7. **相似性去重**：提取时匹配已有条目，卡片上区分"新增"和"追加 #ID"两种操作
 8. **交互卡片确认**：逐条确认，支持"全部保存"/"跳过"
 9. **对话历史清除**：`/clear` 命令
+10. **定时 AI 洗盘 + 早报推送**：凌晨 00:30 AI 分析所有 active facts 给出清洗建议并存 DB；09:00 向 PRIMARY_ADMIN_OPEN_ID 推送风险日报 + AI 决策报告合并版（APScheduler 内置于 FastAPI）
 
 ## 管理员命令速查
 ```
@@ -134,9 +139,11 @@ updated_at  TEXT    -- 本地时间，每次更新自动刷新
 ADMIN_OPEN_IDS=ou_d1ccad1071d7daf767337953ffeb317a,ou_佟海鹏的open_id
 NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 ```
-- `ADMIN_OPEN_IDS`：有权使用 `/admin` 命令，且自动收日报
+- `ADMIN_OPEN_IDS`：有权使用 `/admin` 命令
+- `PRIMARY_ADMIN_OPEN_ID`：APScheduler 早报唯一接收人（杜莹芳），默认取 ADMIN_OPEN_IDS 首个，建议显式配置
 - `NOTIFY_OPEN_IDS`：只收日报，无管理权限
-- notify.py 发送目标 = `ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS` 并集
+- notify.py 独立脚本发送目标 = `ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS` 并集（crontab 版）
+- APScheduler 早报只发给 `PRIMARY_ADMIN_OPEN_ID`
 - 获取 open_id：让对方发一条消息，从 `logs/app.log` 找 `sender=ou_xxx`
 
 ## 飞书应用配置要点
@@ -152,7 +159,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 ## 待开发
 - [ ] 佟海鹏 open_id 添加到 .env ADMIN_OPEN_IDS（让他在飞书发一条消息看日志）
 - [ ] systemd 自动重启（当前重启服务器后需手动拉起）
-- [ ] 定时任务：每日/每周风险提醒推送
+- [x] 定时任务：凌晨 AI 洗盘（00:30）+ 早报推送（09:00），APScheduler 内置于 FastAPI
 - [ ] 项目上下文感知（群组绑定项目，自动注入项目信息）
 - [ ] 多项目支持
 - [ ] 知识库 Web 管理后台

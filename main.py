@@ -3,18 +3,21 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 import claude_client
 import db
 import feishu
+import notify as _notify
 from config import (
     ADMIN_OPEN_IDS,
     FEISHU_APP_ID,
     FEISHU_APP_SECRET,
     FEISHU_VERIFICATION_TOKEN,
     MAX_HISTORY,
+    PRIMARY_ADMIN_OPEN_ID,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -29,11 +32,49 @@ _PRIO_LABELS = {"high": "高", "medium": "中", "low": "低"}
 _STATUS_LABELS = {"active": "open", "resolved": "resolved", "archived": "archived"}
 
 
+_scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+
+
+async def _run_nightly_review():
+    """凌晨0:30：AI分析所有facts，清洗报告存入DB。"""
+    try:
+        facts_text = db.get_all_facts_for_review()
+        if not facts_text:
+            log.info("nightly review: no active facts to review")
+            return
+        report = await claude_client.nightly_review(facts_text)
+        db.save_nightly_review(report)
+        log.info("nightly review saved to DB")
+    except Exception:
+        log.exception("nightly review error")
+
+
+async def _send_morning_report():
+    """早上9:00：发送风险日报 + AI洗盘报告给主管理员。"""
+    try:
+        if not PRIMARY_ADMIN_OPEN_ID:
+            log.warning("PRIMARY_ADMIN_OPEN_ID not set, skipping morning report")
+            return
+        review = db.get_latest_nightly_review()
+        report = _notify.build_morning_report(review)
+        await feishu.send_text_to_user(
+            PRIMARY_ADMIN_OPEN_ID, report, FEISHU_APP_ID, FEISHU_APP_SECRET
+        )
+        log.info("morning report sent to %s", PRIMARY_ADMIN_OPEN_ID)
+    except Exception:
+        log.exception("morning report error")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
     log.info("DB initialized")
+    _scheduler.add_job(_run_nightly_review, "cron", hour=0, minute=30, id="nightly_review")
+    _scheduler.add_job(_send_morning_report, "cron", hour=9, minute=0, id="morning_report")
+    _scheduler.start()
+    log.info("Scheduler started: nightly_review@00:30, morning_report@09:00 (Asia/Shanghai)")
     yield
+    _scheduler.shutdown()
 
 
 app = FastAPI(lifespan=lifespan)

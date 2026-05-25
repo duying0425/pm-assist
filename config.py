@@ -14,3 +14,9 @@ AI_MODEL = os.getenv("AI_MODEL", "anthropic/claude-sonnet-4-5")
 ADMIN_OPEN_IDS = set(filter(None, os.getenv("ADMIN_OPEN_IDS", "").split(",")))
 NOTIFY_OPEN_IDS = set(filter(None, os.getenv("NOTIFY_OPEN_IDS", "").split(",")))
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
+
+# 决策报告唯一接收人（默认取 ADMIN_OPEN_IDS 第一个，或单独配置）
+PRIMARY_ADMIN_OPEN_ID = os.getenv(
+    "PRIMARY_ADMIN_OPEN_ID",
+    next(iter(sorted(ADMIN_OPEN_IDS)), ""),
+)

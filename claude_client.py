@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from openai import AsyncOpenAI
 from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, AI_MODEL
 
@@ -79,6 +81,40 @@ _EXTRACT_PROMPT = """你是一个信息提取助手。分析下面这段项目�
 
 用户消息：
 """
+
+
+_REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析以下项目信息库的所有条目，给出清洗建议报告。
+
+重点检查：
+1. **疑似重复**：内容或标题高度相似的条目，建议其中一条归档
+2. **疑似过期**：最后更新超过30天且看起来已完成或不再相关的条目
+3. **高优先级但无负责人**：高优先级条目缺少 owner 字段
+4. **超期未关闭**：截止日期已过但仍为 active 的条目
+5. **优先级合理性**：结合内容判断优先级是否准确
+
+输出格式要求：
+- 每类问题独立一节，发现几条写几条，无问题可跳过该节
+- 每条建议附上可直接执行的 /admin fact 命令（如 /admin fact archive 3）
+- 末尾给出整体数据健康评分：优 / 良 / 待改善，并说明理由（一句话）
+
+项目信息库（共 {count} 条 active 条目）：
+{facts_text}
+"""
+
+
+async def nightly_review(facts_text: str) -> str:
+    count = facts_text.count("\n  标题:")
+    today = datetime.now().strftime("%Y-%m-%d")
+    prompt = _REVIEW_PROMPT_TPL.format(today=today, count=count, facts_text=facts_text)
+    try:
+        response = await _client.chat.completions.create(
+            model=AI_MODEL,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"AI洗盘分析失败：{e}"
 
 
 async def extract_facts(text: str) -> list[dict]:
