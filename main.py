@@ -22,7 +22,6 @@ from config import (
     FEISHU_APP_SECRET,
     FEISHU_VERIFICATION_TOKEN,
     MAX_HISTORY,
-    PRIMARY_ADMIN_OPEN_ID,
 )
 
 _ROLE_ZH = {"super_admin": "管理员", "pm": "项目经理PM", "member": "项目成员", "pending": "待审批"}
@@ -983,14 +982,13 @@ async def _handle_join(text: str, sender_open_id: str, user: dict) -> str:
     db.upsert_user(sender_open_id, name=name, role=role_req,
                    project=project_name, status="pending")
 
-    # 发审批卡片给主管理员
+    # 发审批卡片给所有管理员
     try:
         card = feishu.build_approval_card(sender_open_id, name, role_req, project_name)
-        await feishu.send_card_to_user(
-            PRIMARY_ADMIN_OPEN_ID, card, FEISHU_APP_ID, FEISHU_APP_SECRET
-        )
-        log.info("approval card sent to admin for %s role=%s project=%s",
-                 sender_open_id, role_req, project_name)
+        for admin_id in ADMIN_OPEN_IDS:
+            await feishu.send_card_to_user(admin_id, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        log.info("approval card sent to %d admins for %s role=%s project=%s",
+                 len(ADMIN_OPEN_IDS), sender_open_id, role_req, project_name)
     except Exception:
         log.exception("failed to send approval card")
 
