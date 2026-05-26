@@ -505,6 +505,147 @@ def card_todo_skipped_response() -> dict:
     }
 
 
+# ── Merge 确认卡片 ─────────────────────────────────────────
+
+def build_merge_confirm_card(merges: list[dict], chat_id: str,
+                             saved_count: int = 0) -> dict:
+    elements = []
+    for i, item in enumerate(merges[:10]):
+        keep_id = item.get("keep_id", "")
+        merge_ids = item.get("merge_ids", [])
+        reason = item.get("reason", "")
+        append_text = item.get("append_text", "")
+        append_preview = append_text if len(append_text) <= 70 else append_text[:67] + "…"
+        merge_text = ", ".join(f"#{mid}" for mid in merge_ids)
+
+        elements.append({
+            "tag": "column_set",
+            "flex_mode": "none",
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 5,
+                    "elements": [{
+                        "tag": "div",
+                        "text": {"tag": "lark_md",
+                                 "content": (
+                                     f"**{i + 1}. 合并到 #{keep_id}**\n"
+                                     f"合入：{merge_text}\n"
+                                     f"原因：{reason}\n"
+                                     f"追加：{append_preview}"
+                                 )},
+                    }],
+                },
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "elements": [{
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "合并"},
+                        "type": "primary",
+                        "value": {
+                            "action": "merge_one",
+                            "chat_id": chat_id,
+                            "index": i,
+                            "saved_count": saved_count,
+                        },
+                    }],
+                },
+            ],
+        })
+
+    title_text = (f"✅ 已合并 {saved_count} 组，还剩 {len(merges)} 组"
+                  if saved_count > 0
+                  else f"🔀 建议合并 {len(merges)} 组信息")
+    elements.extend([
+        {"tag": "hr"},
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "✓ 全部合并"},
+                    "type": "primary",
+                    "value": {"action": "merge_all", "chat_id": chat_id,
+                              "saved_count": saved_count},
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "✗ 跳过"},
+                    "type": "danger",
+                    "value": {"action": "skip_merges", "chat_id": chat_id},
+                },
+            ],
+        },
+    ])
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": title_text},
+            "template": "blue" if saved_count == 0 else "green",
+        },
+        "elements": elements,
+    }
+
+
+async def send_merge_confirm_card(chat_id: str, merges: list[dict],
+                                  app_id: str, app_secret: str):
+    token = await get_tenant_token(app_id, app_secret)
+    card = build_merge_confirm_card(merges, chat_id)
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{FEISHU_BASE}/im/v1/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"receive_id_type": "chat_id"},
+            json={"receive_id": chat_id, "msg_type": "interactive",
+                  "content": json.dumps(card)},
+        )
+
+
+def card_merge_saved_response(count: int) -> dict:
+    return {
+        "toast": {"type": "success", "content": f"已合并 {count} 组信息"},
+        "card": {
+            "type": "raw",
+            "data": {
+                "config": {"enable_forward": False},
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md",
+                             "content": f"✅ 已合并 {count} 组信息。"},
+                }],
+            },
+        },
+    }
+
+
+def card_merge_one_saved_response(item: dict, remaining: list[dict],
+                                  chat_id: str, saved_count: int) -> dict:
+    updated = build_merge_confirm_card(remaining, chat_id, saved_count)
+    return {
+        "toast": {"type": "success", "content": f"已合并到 #{item.get('keep_id')}"},
+        "card": {"type": "raw", "data": updated},
+    }
+
+
+def card_merge_skipped_response() -> dict:
+    return {
+        "toast": {"type": "info", "content": "已跳过"},
+        "card": {
+            "type": "raw",
+            "data": {
+                "config": {"enable_forward": False},
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": "⏭ 已跳过合并建议。"},
+                }],
+            },
+        },
+    }
+
+
 def _split(text: str, limit: int) -> list[str]:
     if len(text) <= limit:
         return [text]

@@ -237,6 +237,7 @@ key / value / updated_at
 - `direct_cleanup` 只执行带 `[AUTO]` 前缀的低风险白名单命令：`/admin fact archive [ID]` 和 `/admin fact update [ID] status|owner|priority|due_date [值]`
 - 不执行 AI 生成的 delete、新增 risk、新增 todo、合并、title/body 改写或其他非白名单命令；priority/status 会做合法值校验
 - 正文改写、风险候选、待办建议属于高风险语义动作，只在报告里给人工确认建议，不自动保存
+- 合并建议通过机器可读 `merge_candidates` 解析后发送飞书确认卡片；点击合并后执行 `append_to_fact(keep_id, ...)` 并归档被合入条目，不硬删除
 
 ## AI 上下文注入顺序（claude_client.py）
 
@@ -321,6 +322,7 @@ key / value / updated_at
 25. **Web 管理后台**：浏览器访问 `https://pm.tmhcorps.cn/admin/`，可视化管理知识库/待办/用户/预设，无需登录（内部工具）（v0.7.0）
 26. **数据库索引优化**：`facts/todos/conversations/processed_events` 核心查询字段加索引，`projects` 表补加 `updated_at`（v0.7.0）
 27. **AI 洗盘配置与手动执行**：Web 后台可切换洗盘模式；飞书 `/admin review run` 可立即洗盘并发送给管理员和 PM（v0.7.1）
+28. **AI 合并建议卡片确认**：洗盘报告中的合并候选会生成飞书卡片，管理员点击后执行合入并归档重复条目（v0.7.1）
 
 ## 命令速查
 
@@ -434,6 +436,7 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - [ ] fact 正文重写：低质量描述生成结构化改写建议，建议走确认卡片，不直接自动覆盖
 - [x] 知识库 Web 管理后台（v0.7.0，`https://pm.tmhcorps.cn/admin/`）
 - [x] AI 洗盘模式配置与手动执行（v0.7.1）
+- [x] AI 合并建议卡片确认（v0.7.1）
 - [x] 群组绑定项目（`/admin project bind`，代码已全部实现）
 - [x] 待办事项系统（todos 表 + /todo 命令 + AI 分解 + 上下文注入）
 - [x] 时间戳注入 AI 上下文

@@ -130,6 +130,54 @@ def _apply_review_commands(report: str) -> list[str]:
     return results
 
 
+def _extract_merge_candidates(report: str) -> list[dict]:
+    start_marker = "===MERGE_CANDIDATES_JSON==="
+    end_marker = "===END_MERGE_CANDIDATES_JSON==="
+    start = report.find(start_marker)
+    end = report.find(end_marker)
+    if start < 0 or end < 0 or end <= start:
+        return []
+    raw = report[start + len(start_marker):end].strip()
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        log.warning("failed to parse merge candidates JSON")
+        return []
+
+    candidates = []
+    for item in payload.get("merge_candidates", []):
+        try:
+            keep_id = int(item.get("keep_id"))
+            merge_ids = [int(mid) for mid in item.get("merge_ids", []) if int(mid) != keep_id]
+        except Exception:
+            continue
+        if not merge_ids:
+            continue
+        keep_fact = db.get_fact(keep_id)
+        if not keep_fact:
+            continue
+        valid_merge_ids = [mid for mid in merge_ids if db.get_fact(mid)]
+        if not valid_merge_ids:
+            continue
+        candidates.append({
+            "keep_id": keep_id,
+            "merge_ids": valid_merge_ids,
+            "reason": str(item.get("reason", ""))[:300],
+            "append_text": str(item.get("append_text", ""))[:1000],
+        })
+    return candidates[:10]
+
+
+def _strip_merge_candidates_json(report: str) -> str:
+    start_marker = "===MERGE_CANDIDATES_JSON==="
+    end_marker = "===END_MERGE_CANDIDATES_JSON==="
+    start = report.find(start_marker)
+    end = report.find(end_marker)
+    if start < 0 or end < 0 or end <= start:
+        return report
+    return (report[:start] + report[end + len(end_marker):]).strip()
+
+
 async def _build_and_save_review(mode: str | None = None) -> str | None:
     facts_text = db.get_all_facts_for_review()
     if not facts_text:
@@ -145,7 +193,7 @@ async def _build_and_save_review(mode: str | None = None) -> str | None:
             f"=== 直接清洗执行结果 ===\n"
             + "\n".join(f"- {r}" for r in results)
         )
-    db.save_nightly_review(report)
+    db.save_nightly_review(_strip_merge_candidates_json(report))
     log.info("nightly review saved to DB mode=%s", effective_mode)
     return report
 
@@ -164,6 +212,17 @@ async def _send_review_to_admins_pm(report: str):
     for uid in recipients:
         await feishu.send_text_to_user(uid, report, FEISHU_APP_ID, FEISHU_APP_SECRET)
     log.info("manual review sent to %d admins/PMs: %s", len(recipients), recipients)
+
+
+async def _send_merge_candidates_card(chat_id: str, report: str):
+    if not chat_id:
+        return
+    candidates = _extract_merge_candidates(report)
+    if not candidates:
+        return
+    db.save_pending_merges(chat_id, candidates)
+    await feishu.send_merge_confirm_card(chat_id, candidates, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    log.info("sent %d merge candidates to chat_id=%s", len(candidates), chat_id)
 
 
 async def _run_nightly_review():
@@ -307,6 +366,15 @@ async def _handle_card_callback(body: dict) -> dict:
         db.clear_pending_todos(chat_id)
         return feishu.card_todo_skipped_response()
 
+    # ── 合并确认卡片 ──
+    if action == "merge_one":
+        return _card_merge_one(value, chat_id)
+    if action == "merge_all":
+        return _card_merge_all(value, chat_id)
+    if action == "skip_merges":
+        db.clear_pending_merges(chat_id)
+        return feishu.card_merge_skipped_response()
+
     db.clear_pending(chat_id)
     return feishu.card_skipped_response()
 
@@ -350,6 +418,48 @@ def _card_save_todo_all(value: dict, chat_id: str) -> dict:
         return feishu.card_todo_saved_response(prev_saved + len(pending))
     db.clear_pending_todos(chat_id)
     return feishu.card_todo_skipped_response()
+
+
+def _apply_merge_item(item: dict):
+    keep_id = int(item["keep_id"])
+    merge_ids = [int(mid) for mid in item.get("merge_ids", [])]
+    append_text = item.get("append_text", "").strip()
+    reason = item.get("reason", "").strip()
+    source = ", ".join(f"#{mid}" for mid in merge_ids)
+    addition_parts = [f"合并自 {source}"]
+    if reason:
+        addition_parts.append(f"原因：{reason}")
+    if append_text:
+        addition_parts.append(f"补充：{append_text}")
+    db.append_to_fact(keep_id, "；".join(addition_parts))
+    for mid in merge_ids:
+        if mid != keep_id:
+            db.update_fact(mid, status="archived")
+
+
+def _card_merge_one(value: dict, chat_id: str) -> dict:
+    index = int(value.get("index", -1))
+    saved_count = int(value.get("saved_count", 0))
+    saved, remaining = db.pop_pending_merge(chat_id, index)
+    if saved:
+        _apply_merge_item(saved)
+        saved_count += 1
+        if remaining:
+            return feishu.card_merge_one_saved_response(saved, remaining, chat_id, saved_count)
+        return feishu.card_merge_saved_response(saved_count)
+    return feishu.card_merge_skipped_response()
+
+
+def _card_merge_all(value: dict, chat_id: str) -> dict:
+    prev_saved = int(value.get("saved_count", 0))
+    pending = db.get_pending_merges(chat_id)
+    if pending:
+        for item in pending:
+            _apply_merge_item(item)
+        db.clear_pending_merges(chat_id)
+        return feishu.card_merge_saved_response(prev_saved + len(pending))
+    db.clear_pending_merges(chat_id)
+    return feishu.card_merge_skipped_response()
 
 
 async def _handle_card_trigger(event: dict) -> dict:
@@ -396,6 +506,15 @@ async def _handle_card_trigger(event: dict) -> dict:
         if action == "skip_todos":
             db.clear_pending_todos(chat_id)
             return feishu.card_todo_skipped_response()
+
+        # ── 合并确认卡片 ──
+        if action == "merge_one":
+            return _card_merge_one(value, chat_id)
+        if action == "merge_all":
+            return _card_merge_all(value, chat_id)
+        if action == "skip_merges":
+            db.clear_pending_merges(chat_id)
+            return feishu.card_merge_skipped_response()
 
         # ── 知识库确认卡片 ──
         if action == "save_one":
@@ -598,7 +717,7 @@ async def _handle_message(event: dict):
         if text.startswith("/admin fact decompose"):
             reply = await _handle_admin_fact_decompose(text, chat_id=chat_id)
         elif text.startswith("/admin review run"):
-            reply = await _handle_admin_review_run(text)
+            reply = await _handle_admin_review_run(text, chat_id=chat_id)
         else:
             reply = _handle_admin(text, sender_open_id, project, chat_id)
         await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
@@ -955,7 +1074,7 @@ async def _handle_admin_fact_decompose(text: str, chat_id: str = "") -> str:
     return "\n".join(lines)
 
 
-async def _handle_admin_review_run(text: str) -> str:
+async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
     args = text.split()[2:]
     mode = _get_review_mode()
     if len(args) >= 2:
@@ -968,8 +1087,11 @@ async def _handle_admin_review_run(text: str) -> str:
     if not report:
         return "当前没有 active 项目信息条目，未生成洗盘报告。"
 
-    await _send_review_to_admins_pm(report)
-    return f"✓ 已完成手动 AI 洗盘（{_review_mode_label(mode)}），报告已发送给管理员和 PM。"
+    await _send_review_to_admins_pm(_strip_merge_candidates_json(report))
+    await _send_merge_candidates_card(chat_id, report)
+    merge_count = len(_extract_merge_candidates(report))
+    suffix = f" 另发现 {merge_count} 组合并建议，请在卡片中确认。" if merge_count else ""
+    return f"✓ 已完成手动 AI 洗盘（{_review_mode_label(mode)}），报告已发送给管理员和 PM。{suffix}"
 
 
 def _handle_admin_review(args: list[str]) -> str:
