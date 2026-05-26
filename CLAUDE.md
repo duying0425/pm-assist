@@ -181,6 +181,12 @@ items_json 是数组，每项含：`type / content / action(new|update) / fact_i
 event_id（PRIMARY KEY）/ created_at
 ```
 
+**system_settings**（系统配置，v0.7.1 新增）
+```
+key / value / updated_at
+```
+当前使用项：`nightly_review_mode`，取值 `report_only`（仅报告，默认）或 `direct_cleanup`（直接清洗）。
+
 ## 关键函数（db.py）
 
 **四层上下文**：
@@ -220,7 +226,15 @@ event_id（PRIMARY KEY）/ created_at
 **洗盘相关**：
 - `save_nightly_review(content)` → 存入 AI 洗盘报告
 - `get_latest_nightly_review()` → 取最新洗盘报告
-- `get_all_facts_for_review()` → 所有 active 非 report 条目，供 AI 分析
+- `get_all_facts_for_review()` → 所有 active 非 report 的 facts 条目，供 AI 分析；输入包含 project，避免跨项目误判重复
+- `get_setting(key, default)` / `set_setting(key, value)` → 读取/保存系统配置
+
+**洗盘边界**：
+- 当前洗盘对象是 `facts` 表，不包含 `todos`、`assumptions`、`org_units`
+- `todos` 不是 fact；todo 可通过 `source_fact_id` 关联 risk/issue/blocker，但不会被当前洗盘直接处理
+- `direct_cleanup` 只执行白名单命令：`/admin fact archive [ID]` 和 `/admin fact update [ID] status|owner|priority|due_date|title|body [值]`
+- 不执行 AI 生成的 delete 或其他非白名单命令；priority/status 会做合法值校验
+- 当前洗盘偏数据治理（重复/过期/缺 owner/超期/优先级），不主动重写低质量正文；正文重写后续应单独做确认式能力
 
 ## AI 上下文注入顺序（claude_client.py）
 
@@ -289,7 +303,7 @@ event_id（PRIMARY KEY）/ created_at
 9. **相似性去重**：提取时匹配已有条目，卡片上区分"新增"和"追加 #ID"
 10. **交互卡片确认**：逐条确认，支持"全部保存"/"跳过"；卡片标题动态显示进度；计数正确累加
 11. **对话历史清除**：`/clear` 命令
-12. **定时 AI 洗盘 + 早报推送**：凌晨 00:30 洗盘存 DB；09:00 推送给 ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS（APScheduler 内置）
+12. **定时 AI 洗盘 + 早报推送**：凌晨 00:30 洗盘存 DB；09:00 推送给 ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS（APScheduler 内置）；支持 `report_only/direct_cleanup` 两种模式
 13. **待办事项系统**：`/todo` 命令新建/查询/完成/取消；支持关联 risk 追溯、挂载里程碑；AI 上下文带 todo 信息
 14. **AI 分解 risk**：`/admin fact decompose [ID]` 自动将风险拆解为可执行 todo 列表
 15. **时间戳上下文**：所有 facts 条目在 AI 上下文中带记录/更新日期，AI 可判断信息时效
@@ -304,6 +318,7 @@ event_id（PRIMARY KEY）/ created_at
 24. **`/admin fact decompose` 卡片确认**：AI 分解 risk 后不再直接写库，改为弹出待办确认卡片，用户可按需选择保存（v0.6.3）
 25. **Web 管理后台**：浏览器访问 `https://pm.tmhcorps.cn/admin/`，可视化管理知识库/待办/用户/预设，无需登录（内部工具）（v0.7.0）
 26. **数据库索引优化**：`facts/todos/conversations/processed_events` 核心查询字段加索引，`projects` 表补加 `updated_at`（v0.7.0）
+27. **AI 洗盘配置与手动执行**：Web 后台可切换洗盘模式；飞书 `/admin review run` 可立即洗盘并发送给管理员和 PM（v0.7.1）
 
 ## 命令速查
 
@@ -347,6 +362,14 @@ event_id（PRIMARY KEY）/ created_at
 /admin fact add [type] [标题] | [正文] 新增
 /admin fact decompose [ID]             AI 分解 risk 为待办列表
 
+# AI 洗盘
+/admin review status                   查看当前洗盘模式
+/admin review mode report              设置为仅报告（默认，不改数据）
+/admin review mode direct              设置为直接清洗（执行白名单命令）
+/admin review run                      按当前模式立即洗盘，发送给管理员和 PM
+/admin review run report               临时按仅报告模式执行一次
+/admin review run direct               临时按直接清洗模式执行一次
+
 # 预设假设管理（部门公认背景知识）
 /admin assumption list [dept|project|client]
 /admin assumption show [ID]
@@ -374,6 +397,7 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - `ADMIN_OPEN_IDS`：有权使用 `/admin` 命令
 - `NOTIFY_OPEN_IDS`：只收日报，无管理权限
 - APScheduler 早报发送给 `ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS` 全量
+- 手动 `/admin review run` 发送给 `.env ADMIN_OPEN_IDS` + 数据库中 active 的 `super_admin` 和 `pm`
 - **不要同时启用 crontab 跑 notify.py**，否则主管理员收到两份
 - 获取 open_id：让对方发一条消息，从 `logs/app.log` 找 `sender=ou_xxx`
 
@@ -387,13 +411,15 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - `aliyun.tmhcorps.cn` DNS 须设为"仅DNS"（灰云），否则 SSH 被 Cloudflare 拦截
 - 飞书卡片回调响应 body 必须包含 `card.type="raw"` 和 `data` 包装层
 - APScheduler 的定时任务在服务重启后重新注册，若服务在 00:30 后重启，当天洗盘会跳过（次日才补跑）
+- AI 洗盘 `direct_cleanup` 会修改 facts，请先用 `/admin review run report` 观察建议质量；目前不会清洗 todos
+- Web 后台概览页可切换洗盘模式，但没有单独登录认证，仍按内部工具处理
 
 ## 服务器当前状态
-- v0.7.0 已部署（Web 管理后台 + DB 索引优化）
+- v0.7.1 已部署（AI 洗盘模式配置 + 手动洗盘发送 + direct_cleanup 白名单执行）
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
-- todos/users/projects 表由 `init_db()` 自动创建，无需手动迁移
-- v0.7.0 起 `init_db()` 自动补加 projects.updated_at 列和4条索引（幂等）
+- todos/users/projects/system_settings 表由 `init_db()` 自动创建，无需手动迁移
+- v0.7.0 起 `init_db()` 自动补加 projects.updated_at 列和4条索引（幂等）；v0.7.1 起自动创建 system_settings
 - notify.py 的 crontab 条目已删除（早报改由 APScheduler 统一发送）
 - **部署后首次启动**：`init_db()` 自动创建 users/projects 表并种入「雅迪」项目；.env 中的 ADMIN_OPEN_IDS 用户首次发消息时自动注册为 super_admin
 
@@ -402,7 +428,10 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - [ ] systemd 自动重启（当前重启服务器后需手动拉起）
 - [ ] Web 后台登录认证（当前无认证，内部工具暂可接受）
 - [ ] 多项目支持完善（Web 后台已支持筛选，飞书侧已有群聊绑定）
+- [ ] todo 洗盘：超期、长期 open、缺 owner、源风险已关闭但 todo 仍 open
+- [ ] fact 正文重写：低质量描述生成结构化改写建议，建议走确认卡片，不直接自动覆盖
 - [x] 知识库 Web 管理后台（v0.7.0，`https://pm.tmhcorps.cn/admin/`）
+- [x] AI 洗盘模式配置与手动执行（v0.7.1）
 - [x] 群组绑定项目（`/admin project bind`，代码已全部实现）
 - [x] 待办事项系统（todos 表 + /todo 命令 + AI 分解 + 上下文注入）
 - [x] 时间戳注入 AI 上下文
