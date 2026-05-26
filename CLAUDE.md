@@ -234,6 +234,38 @@ event_id（PRIMARY KEY）/ created_at
 
 **AI 分解函数**：`decompose_risk(fact)` → 调用 AI 将 risk 条目拆解为 2-6 条可执行 todo（JSON 格式）
 
+## 角色与权限系统（v0.6.0 新增）
+
+### 角色
+| 角色 | 来源 | 权限 |
+|------|------|------|
+| `super_admin` | .env `ADMIN_OPEN_IDS` 自动注册，或管理员手动提升 | 全部功能 + /admin 系列 + AI 数据查询 |
+| `pm` | 用户申请，管理员审批 | 当前 PM 工作模式（知识库、todo、AI 提取卡片） |
+| `member` | 用户申请，管理员审批 | 轻量 AI 对话（不注入 todos/risks，不触发提取卡片） |
+| `pending` | 已申请未审批 | 仅 /register /join /help /version |
+
+### 注册流程
+1. 用户发 `/register` 查看项目列表
+2. 发 `/join [项目名] [pm|member]` 提交申请
+3. 主管理员（`PRIMARY_ADMIN_OPEN_ID`）收到飞书审批卡片
+4. 点击「批准」→ 用户状态改为 active + 通知用户；点击「拒绝」→ 通知用户被拒
+
+### 数据库新增表
+- **users**：`open_id/name/role/project/status(pending|active|rejected|inactive)`
+- **projects**：`name/description/created_by/active`；默认种入「雅迪」项目
+
+### AI 说话人注入
+每次对话在 system prompt 注入当前用户身份，例：
+- `管理员-杜莹芳（最高权限，可询问系统数据和数据库信息）`
+- `项目经理PM-佟海鹏（雅迪项目）`
+- `项目成员-李浩（雅迪项目）`
+
+管理员 AI 上下文额外注入数据库各表结构说明，方便询问系统内部数据。
+
+### 飞书卡片回调新增 actions
+- `approve_user`：批准注册申请
+- `reject_user`：拒绝注册申请
+
 ## 已实现功能
 1. **飞书 Bot 对话**：@Bot 发消息，结合四层知识上下文 + 对话历史用 AI 回答
 2. **知识库管理**：`/admin list/add/update/enable/disable/delete`（兼容旧接口）
@@ -253,6 +285,7 @@ event_id（PRIMARY KEY）/ created_at
 16. **AI 语言约束**：不再说"已记录/已保存"等误导性语言，保存动作由用户通过卡片确认
 17. **@mention 缓存**：消息中 @某人 时自动缓存姓名↔open_id 到 org_units 表，文本保留 @姓名 传给 AI
 18. **版本管理**：`VERSION` 文件 + `/version` 命令
+19. **注册与权限系统**：用户自主注册、管理员审批、三角色差异化 AI 上下文、说话人身份注入（v0.6.0）
 
 ## 命令速查
 
@@ -336,20 +369,21 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - APScheduler 的定时任务在服务重启后重新注册，若服务在 00:30 后重启，当天洗盘会跳过（次日才补跑）
 
 ## 服务器当前状态
-- v0.5.0 架构，待部署
+- v0.6.0 架构，待部署
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
-- todos 表由 `init_db()` 自动创建，无需手动迁移
+- todos/users/projects 表由 `init_db()` 自动创建，无需手动迁移
 - notify.py 的 crontab 条目已删除（早报改由 APScheduler 统一发送）
+- **部署后首次启动**：`init_db()` 自动创建 users/projects 表并种入「雅迪」项目；.env 中的 ADMIN_OPEN_IDS 用户首次发消息时自动注册为 super_admin
 
 ## 待开发
 - [ ] 佟海鹏 open_id 添加到 .env ADMIN_OPEN_IDS（让他在飞书发一条消息看日志）
 - [ ] systemd 自动重启（当前重启服务器后需手动拉起）
 - [ ] 项目上下文感知（群组绑定项目，自动注入项目信息）
-- [ ] 多项目支持
-- [ ] 用户注册与角色管理（super_admin / pm / member，飞书卡片审批）
+- [ ] 多项目支持（当前 facts/todos 仍默认 project=yadi）
 - [ ] 知识库 Web 管理后台
 - [x] 待办事项系统（todos 表 + /todo 命令 + AI 分解 + 上下文注入）
 - [x] 时间戳注入 AI 上下文
 - [x] AI 语言约束（不说"已记录"）
 - [x] @mention 姓名缓存
 - [x] VERSION 版本文件
+- [x] 用户注册与角色管理（super_admin/pm/member，飞书卡片审批，说话人身份注入 AI）

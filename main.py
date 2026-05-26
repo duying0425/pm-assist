@@ -21,6 +21,8 @@ from config import (
     PRIMARY_ADMIN_OPEN_ID,
 )
 
+_ROLE_ZH = {"super_admin": "管理员", "pm": "项目经理PM", "member": "项目成员", "pending": "待审批"}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -141,6 +143,7 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks):
 def _save_fact_item(item: dict):
     """统一保存逻辑：新增或追加更新到已有条目。"""
     action = item.get("action", "new")
+    project = item.get("project", "默认")
     if action == "update" and item.get("fact_id"):
         db.append_to_fact(item["fact_id"], item["content"])
     else:
@@ -150,6 +153,7 @@ def _save_fact_item(item: dict):
             f"[{label}] {item['content'][:20]}",
             item["content"],
             source="ai",
+            project=project,
         )
 
 
@@ -189,6 +193,36 @@ async def _handle_card_trigger(event: dict) -> dict:
         chat_id = value.get("chat_id", "")
         log.info("card trigger action=%s chat_id=%s", action, chat_id)
 
+        # ── 注册审批 ──
+        if action == "approve_user":
+            open_id = value.get("open_id", "")
+            name    = value.get("name", "")
+            role    = value.get("role", "member")
+            project = value.get("project", "")
+            db.update_user(open_id, role=role, project=project, status="active")
+            role_zh = _ROLE_ZH.get(role, role)
+            await feishu.send_text_to_user(
+                open_id,
+                f"🎉 你的注册申请已通过！\n角色：{role_zh}\n项目：{project}\n\n"
+                f"现在可以直接 @Bot 与我对话了，发 /help 查看可用命令。",
+                FEISHU_APP_ID, FEISHU_APP_SECRET,
+            )
+            log.info("approved user %s name=%s role=%s project=%s", open_id, name, role, project)
+            return feishu.card_approved_response(name, role, project)
+
+        if action == "reject_user":
+            open_id = value.get("open_id", "")
+            name    = value.get("name", "")
+            db.update_user(open_id, status="rejected")
+            await feishu.send_text_to_user(
+                open_id,
+                "很抱歉，你的注册申请已被拒绝。如有疑问请联系管理员。",
+                FEISHU_APP_ID, FEISHU_APP_SECRET,
+            )
+            log.info("rejected user %s name=%s", open_id, name)
+            return feishu.card_rejected_response(name)
+
+        # ── 知识库确认卡片 ──
         if action == "save_one":
             index = int(value.get("index", -1))
             saved_count = int(value.get("saved_count", 0))
@@ -227,6 +261,50 @@ async def handle_message(event: dict):
         log.exception("handle_message error")
 
 
+def _resolve_project(chat_id: str, user: dict) -> str:
+    """确定本次对话的项目：群聊绑定 > 用户绑定 > 第一个活跃项目。"""
+    binding = db.get_chat_binding(chat_id)
+    if binding:
+        return binding
+    p = user.get("project", "")
+    if p:
+        return p
+    return "默认"
+
+
+def _get_or_init_user(open_id: str, name: str) -> dict:
+    """获取用户信息；若是 .env 里配置的 admin 则自动注册为 super_admin。"""
+    user = db.get_user(open_id)
+    if user:
+        # 同步姓名（飞书姓名可能变动）
+        if name and user.get("name") != name:
+            db.update_user(open_id, name=name)
+            user["name"] = name
+        return user
+    # 首次出现：env 中的 admin 直接注册为 super_admin（active）
+    if open_id in ADMIN_OPEN_IDS:
+        db.upsert_user(open_id, name=name, role="super_admin", status="active")
+        return db.get_user(open_id) or {"open_id": open_id, "name": name,
+                                         "role": "super_admin", "project": "", "status": "active"}
+    return {"open_id": open_id, "name": name, "role": "unknown",
+            "project": "", "status": "unknown"}
+
+
+def _sender_info(user: dict) -> str:
+    """生成注入 AI 的说话人描述文字。"""
+    role = user.get("role", "unknown")
+    name = user.get("name", "未知用户")
+    project = user.get("project", "")
+    proj_tag = f"（{project}项目）" if project else ""
+    if role == "super_admin":
+        return f"管理员-{name}（最高权限，可询问系统数据和数据库信息）"
+    if role == "pm":
+        return f"项目经理PM-{name}{proj_tag}"
+    if role == "member":
+        return f"项目成员-{name}{proj_tag}"
+    return f"{name}（未注册用户）"
+
+
 async def _handle_message(event: dict):
     message = event.get("message", {})
     sender = event.get("sender", {})
@@ -242,6 +320,7 @@ async def _handle_message(event: dict):
 
     raw = json.loads(message.get("content", "{}"))
     text = raw.get("text", "").strip()
+    sender_name = ""
     for mention in message.get("mentions", []):
         key = mention.get("key", "")
         if not key:
@@ -255,37 +334,80 @@ async def _handle_message(event: dict):
                 db.upsert_person(open_id, name)
             text = text.replace(key, f"@{name}" if name else "").strip()
 
+    # 通过飞书消息中的发送者信息获取姓名
+    sender_name = sender.get("sender_id", {}).get("name", "") or ""
+
     log.info("text: %r", text)
     if not text:
         return
 
+    # 获取/初始化用户信息
+    user = _get_or_init_user(sender_open_id, sender_name)
+    user_role = user.get("role", "unknown")
+    user_status = user.get("status", "unknown")
+
+    # ── 所有人可用命令 ──
     if text == "/help":
-        await feishu.send_text(chat_id, _help_text(), FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_text(chat_id, _help_text(user_role), FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     if text == "/version":
         await feishu.send_text(chat_id, f"pm-assist v{_VERSION}", FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
-    if text.startswith("/admin") and sender_open_id in ADMIN_OPEN_IDS:
+    if text == "/register":
+        await feishu.send_text(chat_id, _register_text(), FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return
+
+    if text.startswith("/join"):
+        reply = await _handle_join(text, sender_open_id, user)
+        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return
+
+    # ── 未注册/待审批用户：仅允许 /register /join /help /version ──
+    if user_role in ("unknown", "pending") or user_status not in ("active",):
+        if user_status == "pending":
+            msg = "你的注册申请正在等待管理员审批，批准后即可使用全部功能。"
+        elif user_status == "rejected":
+            msg = "你的注册申请已被拒绝，如有疑问请联系管理员。"
+        else:
+            msg = "你尚未注册，请发送 /register 查看注册说明。"
+        await feishu.send_text(chat_id, msg, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return
+
+    # 确定本次对话所属项目
+    project = _resolve_project(chat_id, user)
+
+    # ── 管理员专用命令 ──
+    if text.startswith("/admin"):
+        if user_role != "super_admin":
+            await feishu.send_text(chat_id, "无权限：/admin 命令仅限管理员使用。",
+                                   FEISHU_APP_ID, FEISHU_APP_SECRET)
+            return
         if text.startswith("/admin fact decompose"):
             reply = await _handle_admin_fact_decompose(text)
         else:
-            reply = _handle_admin(text)
+            reply = _handle_admin(text, sender_open_id, project, chat_id)
         await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
-    if text.startswith("/note "):
-        note = text[6:].strip()
-        if note:
-            bid = db.add_fact("knowledge", f"笔记#{db.count_notes() + 1}", note, source="manual")
-            await feishu.send_text(chat_id, f"✓ 已记录 (ID:{bid})", FEISHU_APP_ID, FEISHU_APP_SECRET)
-        return
-
-    if text.startswith("/todo"):
-        reply = _handle_todo(text)
-        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
-        return
+    # ── PM / 管理员专用命令 ──
+    if text.startswith("/note ") or text.startswith("/todo"):
+        if user_role not in ("pm", "super_admin"):
+            await feishu.send_text(chat_id, "此命令仅限项目经理PM和管理员使用。",
+                                   FEISHU_APP_ID, FEISHU_APP_SECRET)
+            return
+        if text.startswith("/note "):
+            note = text[6:].strip()
+            if note:
+                bid = db.add_fact("knowledge", f"笔记#{db.count_notes() + 1}",
+                                  note, source="manual", project=project)
+                await feishu.send_text(chat_id, f"✓ 已记录 (ID:{bid})", FEISHU_APP_ID, FEISHU_APP_SECRET)
+            return
+        if text.startswith("/todo"):
+            reply = _handle_todo(text, project=project)
+            await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+            return
 
     if text == "/clear":
         db.clear_history(chat_id)
@@ -293,19 +415,102 @@ async def _handle_message(event: dict):
         await feishu.send_text(chat_id, "对话历史已清除。", FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
+    # ── AI 对话（member/pm/super_admin 均可，上下文深度不同）──
     db.clear_pending(chat_id)
 
     db.add_message(chat_id, "user", text)
     history = db.get_history(chat_id, MAX_HISTORY)
-    context = db.get_full_context()
-    reply = await claude_client.chat(history, context)
+    context = db.get_full_context(project)
+    sender_info_str = _sender_info(user)
+    reply = await claude_client.chat(history, context,
+                                     sender_info=sender_info_str, role=user_role)
     db.add_message(chat_id, "assistant", reply)
     await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
 
-    asyncio.create_task(_extract_and_card(chat_id, text))
+    # 仅 PM 和管理员触发信息提取卡片
+    if user_role in ("pm", "super_admin"):
+        asyncio.create_task(_extract_and_card(chat_id, text, project))
 
 
-async def _extract_and_card(chat_id: str, text: str):
+def _register_text() -> str:
+    projects = db.list_projects(active_only=True)
+    if projects:
+        proj_lines = "\n".join(
+            f"  {i+1}. {p['name']}" + (f"（{p['description']}）" if p.get("description") else "")
+            for i, p in enumerate(projects)
+        )
+    else:
+        proj_lines = "  （暂无项目，请联系管理员创建）"
+    return (
+        "📋 pm-assist 注册系统\n\n"
+        f"可加入的项目：\n{proj_lines}\n\n"
+        "注册步骤：\n"
+        "1. 发送 /join [项目名] [pm|member] 申请加入\n"
+        "   例：/join 雅迪 pm\n"
+        "2. 等待管理员审批（审批后会收到通知）\n"
+        "3. 批准后即可使用完整功能\n\n"
+        "角色说明：\n"
+        "- pm：项目经理，可使用完整PM工作功能（风险管理、待办、AI辅助等）\n"
+        "- member：普通成员，可与AI对话咨询团队/项目问题"
+    )
+
+
+async def _handle_join(text: str, sender_open_id: str, user: dict) -> str:
+    """处理 /join [项目] [pm|member] 申请注册。"""
+    parts = text.split()
+    if len(parts) < 3:
+        return "用法：/join [项目名] [pm|member]\n例：/join 雅迪 pm\n\n发 /register 查看可用项目列表。"
+
+    project_name = parts[1]
+    role_req = parts[2].lower()
+    if role_req not in ("pm", "member"):
+        return "角色只能是 pm 或 member\n例：/join 雅迪 pm"
+
+    # 验证项目存在
+    project = db.get_project_by_name(project_name)
+    if not project or not project.get("active"):
+        projects = db.list_projects(active_only=True)
+        names = "、".join(p["name"] for p in projects) if projects else "（暂无）"
+        return f"找不到项目「{project_name}」。\n当前可用项目：{names}\n\n发 /register 查看详情。"
+
+    # 已是 super_admin，不需要申请
+    if user.get("role") == "super_admin":
+        return "你已经是管理员，无需申请注册。"
+
+    # 已经是 active 用户
+    if user.get("status") == "active":
+        role_zh = _ROLE_ZH.get(user.get("role", ""), user.get("role", ""))
+        return (f"你已注册为「{role_zh}」，绑定项目「{user.get('project', '')}」。\n"
+                "如需变更角色或项目，请联系管理员。")
+
+    # 已有 pending 申请
+    if user.get("status") == "pending":
+        return "你已有一条待审批的申请，请等待管理员处理。"
+
+    # 获取发送者姓名（从 org_units 缓存或使用已知 name）
+    name = user.get("name", "") or sender_open_id[:8]
+
+    # 写入 pending 状态
+    db.upsert_user(sender_open_id, name=name, role=role_req,
+                   project=project_name, status="pending")
+
+    # 发审批卡片给主管理员
+    try:
+        card = feishu.build_approval_card(sender_open_id, name, role_req, project_name)
+        await feishu.send_card_to_user(
+            PRIMARY_ADMIN_OPEN_ID, card, FEISHU_APP_ID, FEISHU_APP_SECRET
+        )
+        log.info("approval card sent to admin for %s role=%s project=%s",
+                 sender_open_id, role_req, project_name)
+    except Exception:
+        log.exception("failed to send approval card")
+
+    role_zh = _ROLE_ZH.get(role_req, role_req)
+    return (f"✅ 申请已提交！\n角色：{role_zh}\n项目：{project_name}\n\n"
+            "等待管理员审批，批准后会收到通知。")
+
+
+async def _extract_and_card(chat_id: str, text: str, project: str = "默认"):
     try:
         items = await claude_client.extract_facts(text)
         if not items:
@@ -319,9 +524,10 @@ async def _extract_and_card(chat_id: str, text: str):
                     "action": "update",
                     "fact_id": similar["id"],
                     "fact_title": similar["title"],
+                    "project": project,
                 })
             else:
-                enriched.append({**item, "action": "new"})
+                enriched.append({**item, "action": "new", "project": project})
         db.save_pending(chat_id, enriched)
         await feishu.send_confirm_card(chat_id, enriched, FEISHU_APP_ID, FEISHU_APP_SECRET)
     except Exception:
@@ -379,7 +585,7 @@ def _todo_help() -> str:
     )
 
 
-def _handle_todo(text: str) -> str:
+def _handle_todo(text: str, project: str = "默认") -> str:
     import re
     rest = text[len("/todo"):].strip()
     if not rest or rest.lower() == "help":
@@ -391,18 +597,18 @@ def _handle_todo(text: str) -> str:
     if sub == "list":
         filter_type = parts[1].lower() if len(parts) > 1 else ""
         if filter_type == "all":
-            rows = db.list_todos(status=None)
+            rows = db.list_todos(status=None, project=project)
         elif filter_type in ("risk", "plan") and len(parts) > 2:
             try:
                 bind_id = int(parts[2])
             except ValueError:
                 return "ID 必须是数字"
             if filter_type == "risk":
-                rows = db.list_todos(status=None, source_fact_id=bind_id)
+                rows = db.list_todos(status=None, source_fact_id=bind_id, project=project)
             else:
-                rows = db.list_todos(status=None, plan_id=bind_id)
+                rows = db.list_todos(status=None, plan_id=bind_id, project=project)
         else:
-            rows = db.list_todos(status="open")
+            rows = db.list_todos(status="open", project=project)
         return _fmt_todo_list(rows)
 
     if sub == "done" and len(parts) >= 2 and parts[1].isdigit():
@@ -438,7 +644,7 @@ def _handle_todo(text: str) -> str:
     if not content:
         return "请输入待办内容"
 
-    tid = db.add_todo(content, source_fact_id=source_fact_id, plan_id=plan_id)
+    tid = db.add_todo(content, source_fact_id=source_fact_id, plan_id=plan_id, project=project)
     suffix = (f"（关联 risk#{source_fact_id}）" if source_fact_id
               else f"（挂载到 milestone#{plan_id}）" if plan_id
               else "")
@@ -469,6 +675,7 @@ async def _handle_admin_fact_decompose(text: str) -> str:
             owner=t.get("owner", ""),
             source_fact_id=fact_id,
             source="ai",
+            project=fact.get("project", "默认"),
         )
         saved.append((tid, t["title"]))
     lines = [f"已从 #{fact_id}《{fact['title']}》分解 {len(saved)} 条待办："]
@@ -479,7 +686,8 @@ async def _handle_admin_fact_decompose(text: str) -> str:
 
 # ── 管理员命令 ────────────────────────────────────────────
 
-def _handle_admin(text: str) -> str:
+def _handle_admin(text: str, sender_open_id: str = "",
+                  project: str = "默认", chat_id: str = "") -> str:
     parts = text.split(None, 4)
     cmd = parts[1].lower() if len(parts) > 1 else ""
 
@@ -533,10 +741,10 @@ def _handle_admin(text: str) -> str:
         return f"✓ 已删除 ID:{bid}"
 
     if cmd == "risk":
-        return _handle_admin_risk(parts[2:] if len(parts) > 2 else [])
+        return _handle_admin_risk(parts[2:] if len(parts) > 2 else [], project=project)
 
     if cmd == "fact":
-        return _handle_admin_fact(parts[2:] if len(parts) > 2 else [])
+        return _handle_admin_fact(parts[2:] if len(parts) > 2 else [], project=project)
 
     if cmd == "assumption":
         return _handle_admin_assumption(parts[2:] if len(parts) > 2 else [])
@@ -544,15 +752,26 @@ def _handle_admin(text: str) -> str:
     if cmd == "org":
         return _handle_admin_org(parts[2:] if len(parts) > 2 else [])
 
+    if cmd == "user":
+        return _handle_admin_user(parts[2:] if len(parts) > 2 else [])
+
+    if cmd == "project":
+        return _handle_admin_project(parts[2:] if len(parts) > 2 else [],
+                                     sender_open_id, chat_id)
+
+    if cmd == "stats":
+        return _handle_admin_stats()
+
     return _admin_help()
 
 
-def _handle_admin_risk(args: list[str]) -> str:
+def _handle_admin_risk(args: list[str], project: str = "默认") -> str:
     sub = args[0].lower() if args else ""
 
     if sub == "list":
         filter_status = args[1] if len(args) > 1 else "open"
-        rows = db.list_risks(status=None if filter_status == "all" else filter_status)
+        rows = db.list_risks(status=None if filter_status == "all" else filter_status,
+                             project=project)
         if not rows:
             return f"无{filter_status}状态的风险/问题"
         lines = [
@@ -599,8 +818,8 @@ def _handle_admin_risk(args: list[str]) -> str:
             title, desc = title.strip(), desc.strip()
         else:
             title, desc = rest.strip(), rest.strip()
-        rid = db.add_risk(type_, title, desc, priority=priority)
-        return f"✓ 已新增 #{rid} [{type_}·{priority}] {title}"
+        rid = db.add_risk(type_, title, desc, priority=priority, project=project)
+        return f"✓ 已新增 #{rid} [{type_}·{priority}] {title}（{project}）"
 
     return (
         "风险命令：\n"
@@ -614,7 +833,7 @@ def _handle_admin_risk(args: list[str]) -> str:
     )
 
 
-def _handle_admin_fact(args: list[str]) -> str:
+def _handle_admin_fact(args: list[str], project: str = "默认") -> str:
     sub = args[0].lower() if args else ""
 
     if sub == "list":
@@ -622,9 +841,13 @@ def _handle_admin_fact(args: list[str]) -> str:
         status_filter = args[2] if len(args) > 2 else "active"
         if len(args) > 1 and args[1] == "all":
             status_filter = None
+        # admin list 默认显示所有项目，加 project 参数时过滤
         rows = db.list_facts(type_=type_filter, status=status_filter)
         if not rows:
             return "无匹配条目"
+        # 判断是否存在多个项目的数据
+        projects_in_data = {r["project"] for r in rows if r.get("project")}
+        multi_project = len(projects_in_data) > 1
         lines = []
         for r in rows:
             label = _TYPE_LABELS.get(r["type"], r["type"])
@@ -632,7 +855,8 @@ def _handle_admin_fact(args: list[str]) -> str:
             prio = f"·{_PRIO_LABELS[r['priority']]}" if r["priority"] in _PRIO_LABELS else ""
             owner = f"（{r['owner']}）" if r["owner"] else ""
             date = r["updated_at"][:10]
-            lines.append(f"#{r['id']} [{label}{prio}·{status}] {r['title']}{owner} [{date}]")
+            proj_tag = f"[{r['project']}]" if multi_project and r.get("project") else ""
+            lines.append(f"#{r['id']} {proj_tag}[{label}{prio}·{status}] {r['title']}{owner} [{date}]")
         return "\n".join(lines)
 
     if sub == "show" and len(args) >= 2:
@@ -697,8 +921,8 @@ def _handle_admin_fact(args: list[str]) -> str:
             title, body = title.strip(), body.strip()
         else:
             title, body = rest.strip(), rest.strip()
-        fid = db.add_fact(type_, title, body, source="manual")
-        return f"✓ 已新增 #{fid} [{type_}] {title}"
+        fid = db.add_fact(type_, title, body, source="manual", project=project)
+        return f"✓ 已新增 #{fid} [{type_}] {title}（{project}）"
 
     return (
         "fact 命令：\n"
@@ -841,58 +1065,270 @@ def _handle_admin_org(args: list[str]) -> str:
     )
 
 
-def _help_text() -> str:
-    return """PM助手使用说明
+def _handle_admin_user(args: list[str]) -> str:
+    sub = args[0].lower() if args else ""
 
-所有人可用：
-  @Bot [消息]              AI对话（结合知识库、风险和待办上下文）
-  /note [内容]             快速记录一条笔记
-  /todo list               查看进行中的待办
-  /todo list all           查看全部待办（含已完成）
-  /todo list risk [ID]     查看某风险关联的待办
-  /todo list plan [ID]     查看某里程碑挂载的待办
-  /todo [内容]              新建独立待办
-  /todo [内容] risk [ID]   从 risk 分解新建待办
-  /todo [内容] plan [ID]   挂到里程碑新建待办
-  /todo done [ID]          标记待办完成
-  /todo cancel [ID]        取消待办
-  /clear                   清除当前会话历史
-  /version                 查看当前版本号
-  /help                    显示本说明
+    if sub == "list":
+        rows = db.list_users()
+        if not rows:
+            return "暂无注册用户"
+        lines = []
+        for r in rows:
+            status_tag = {"active": "✓", "pending": "⏳", "rejected": "✗", "inactive": "—"}.get(
+                r["status"], r["status"])
+            role_zh = _ROLE_ZH.get(r["role"], r["role"])
+            proj = f"/{r['project']}" if r.get("project") else ""
+            lines.append(
+                f"{status_tag} {r['name'] or '(未知)'} [{role_zh}{proj}]"
+                f"  {r['open_id'][:16]}…  加入:{r['created_at'][:10]}"
+            )
+        return f"用户列表（共 {len(rows)} 人）：\n" + "\n".join(lines)
 
-管理员 — 风险管理：
-  /admin risk list [open|all]
-  /admin risk close/reopen [ID]
-  /admin risk owner [ID] [姓名]
-  /admin risk add [type] [priority] [标题] | [描述]
-    type: risk|issue|blocker|dependency
+    if sub == "show" and len(args) >= 2:
+        keyword = " ".join(args[1:])
+        # 按 open_id 或 name 模糊查找
+        rows = db.list_users()
+        matches = [r for r in rows if keyword in r["open_id"] or keyword in (r["name"] or "")]
+        if not matches:
+            return f"找不到用户：{keyword}"
+        lines = []
+        for r in matches:
+            lines.append(
+                f"姓名：{r['name'] or '(未知)'}\n"
+                f"open_id：{r['open_id']}\n"
+                f"角色：{_ROLE_ZH.get(r['role'], r['role'])}\n"
+                f"项目：{r['project'] or '—'}\n"
+                f"状态：{r['status']}\n"
+                f"注册：{r['created_at'][:16]}"
+            )
+        return "\n---\n".join(lines)
 
-管理员 — 统一信息管理：
-  /admin fact list [type] [active|all]
-  /admin fact show [ID]
-  /admin fact update [ID] [field] [值]
-  /admin fact archive/delete [ID]
-  /admin fact add [type] [标题] | [正文]
-  /admin fact decompose [ID]   AI 分解 risk 为待办列表
+    if sub == "role" and len(args) >= 3:
+        open_id = args[1]
+        new_role = args[2].lower()
+        if new_role not in ("pm", "member", "super_admin"):
+            return "角色只能是 pm | member | super_admin"
+        db.update_user(open_id, role=new_role)
+        return f"✓ 已将 {open_id[:16]}… 的角色改为 {new_role}"
 
-管理员 — 预设假设（部门公认背景知识）：
-  /admin assumption list [dept|project|client]
-  /admin assumption show [ID]
-  /admin assumption add [scope] [confidence] [标题] | [正文]
-  /admin assumption update/archive/delete [ID]
+    if sub == "approve" and len(args) >= 2:
+        open_id = args[1]
+        user = db.get_user(open_id)
+        if not user:
+            return f"找不到用户 {open_id[:16]}…"
+        role = user.get("role", "member")
+        project = user.get("project", "")
+        db.update_user(open_id, status="active")
+        return f"✓ 已批准 {user.get('name', open_id[:16])} [{_ROLE_ZH.get(role, role)}·{project}]"
 
-管理员 — 组织结构：
-  /admin org list
-  /admin org add [type] [名称] [父ID?]"""
+    if sub == "reject" and len(args) >= 2:
+        open_id = args[1]
+        user = db.get_user(open_id)
+        if not user:
+            return f"找不到用户 {open_id[:16]}…"
+        db.update_user(open_id, status="rejected")
+        return f"✓ 已拒绝 {user.get('name', open_id[:16])}"
+
+    if sub == "remove" and len(args) >= 2:
+        open_id = args[1]
+        user = db.get_user(open_id)
+        if not user:
+            return f"找不到用户 {open_id[:16]}…"
+        db.delete_user(open_id)
+        return f"✓ 已删除用户 {user.get('name', open_id[:16])}"
+
+    return (
+        "用户管理命令：\n"
+        "/admin user list                           列出所有用户\n"
+        "/admin user show [姓名/open_id]            查看用户详情\n"
+        "/admin user role [open_id] [pm|member|super_admin]  修改角色\n"
+        "/admin user approve [open_id]              手动批准申请\n"
+        "/admin user reject [open_id]               拒绝申请\n"
+        "/admin user remove [open_id]               删除用户"
+    )
+
+
+def _handle_admin_project(args: list[str], sender_open_id: str = "", chat_id: str = "") -> str:
+    sub = args[0].lower() if args else ""
+
+    if sub == "list":
+        rows = db.list_projects(active_only=False)
+        if not rows:
+            return "暂无项目"
+        bindings = {b["project"]: b["chat_id"] for b in db.list_chat_bindings()}
+        lines = []
+        for r in rows:
+            status = "✓" if r["active"] else "✗"
+            bound = f"（已绑群聊）" if r["name"] in bindings.values() else ""
+            desc = f"（{r['description']}）" if r.get("description") else ""
+            lines.append(f"#{r['id']} {status} {r['name']}{desc}{bound}")
+        return "\n".join(lines)
+
+    if sub == "add" and len(args) >= 2:
+        rest = " ".join(args[1:])
+        if "|" in rest:
+            name, desc = rest.split("|", 1)
+            name, desc = name.strip(), desc.strip()
+        else:
+            name, desc = rest.strip(), ""
+        try:
+            pid = db.add_project(name, desc, created_by=sender_open_id)
+            return f"✓ 已创建项目 #{pid}「{name}」"
+        except Exception:
+            return f"创建失败（项目名「{name}」可能已存在）"
+
+    if sub == "close" and len(args) >= 2:
+        try:
+            pid = int(args[1])
+        except ValueError:
+            return "ID 必须是数字"
+        db.update_project(pid, active=0)
+        return f"✓ 项目 #{pid} 已关闭"
+
+    if sub == "open" and len(args) >= 2:
+        try:
+            pid = int(args[1])
+        except ValueError:
+            return "ID 必须是数字"
+        db.update_project(pid, active=1)
+        return f"✓ 项目 #{pid} 已重新开启"
+
+    if sub == "bind" and len(args) >= 2:
+        # /admin project bind [项目名]  — 绑定当前 chat 到项目
+        proj_name = " ".join(args[1:])
+        proj = db.get_project_by_name(proj_name)
+        if not proj or not proj["active"]:
+            projs = db.list_projects(active_only=True)
+            names = "、".join(p["name"] for p in projs)
+            return f"找不到项目「{proj_name}」，当前项目：{names}"
+        if not chat_id:
+            return "无法获取当前群聊 ID，请在群聊中使用此命令"
+        db.set_chat_binding(chat_id, proj_name)
+        return f"✓ 当前群聊已绑定到项目「{proj_name}」"
+
+    if sub == "unbind":
+        if not chat_id:
+            return "无法获取当前群聊 ID"
+        db.delete_chat_binding(chat_id)
+        return "✓ 当前群聊的项目绑定已解除"
+
+    if sub == "bindings":
+        rows = db.list_chat_bindings()
+        if not rows:
+            return "暂无群聊绑定"
+        return "\n".join(f"{r['chat_id']} → {r['project']}" for r in rows)
+
+    return (
+        "项目管理命令：\n"
+        "/admin project list                  列出所有项目\n"
+        "/admin project add [名称] | [描述]   创建项目\n"
+        "/admin project close [ID]            关闭项目\n"
+        "/admin project open [ID]             重新开启项目\n"
+        "/admin project bind [项目名]         将当前群聊绑定到项目\n"
+        "/admin project unbind                解除当前群聊绑定\n"
+        "/admin project bindings              查看所有群聊绑定"
+    )
+
+
+def _handle_admin_stats() -> str:
+    stats = db.get_system_stats()
+    # 用户统计
+    user_summary: dict[str, dict] = {}
+    for r in stats["users"]:
+        role = r["role"]
+        status = r["status"]
+        if role not in user_summary:
+            user_summary[role] = {}
+        user_summary[role][status] = r["cnt"]
+    user_lines = []
+    for role in ("super_admin", "pm", "member", "pending"):
+        if role in user_summary:
+            statuses = user_summary[role]
+            active = statuses.get("active", 0)
+            pending = statuses.get("pending", 0)
+            role_zh = _ROLE_ZH.get(role, role)
+            s = f"  {role_zh}：{active} 人"
+            if pending:
+                s += f"（{pending} 待审批）"
+            user_lines.append(s)
+    # facts 统计
+    fact_summary = {r["type"]: r["cnt"] for r in stats["facts"]}
+    risk_cnt = sum(fact_summary.get(t, 0) for t in ("risk", "issue", "blocker", "dependency"))
+    # todos 统计
+    todo_summary = {r["status"]: r["cnt"] for r in stats["todos"]}
+    lines = [
+        "=== 系统统计 ===",
+        f"项目数：{stats['project_count']} 个（活跃）",
+        "用户：",
+        *user_lines,
+        f"知识库（active）：{sum(fact_summary.values())} 条",
+        f"  风险/问题：{risk_cnt} | 里程碑：{fact_summary.get('milestone', 0)}"
+        f" | 决策：{fact_summary.get('decision', 0)} | 知识：{fact_summary.get('knowledge', 0)}",
+        f"待办：open {todo_summary.get('open', 0)} | done {todo_summary.get('done', 0)}"
+        f" | cancelled {todo_summary.get('cancelled', 0)}",
+        f"最近洗盘：{stats['last_review']}",
+    ]
+    return "\n".join(lines)
+
+
+def _help_text(role: str = "unknown") -> str:
+    common = (
+        "pm-assist 使用说明\n\n"
+        "所有人可用：\n"
+        "  @Bot [消息]              AI对话\n"
+        "  /register                查看注册说明与可用项目\n"
+        "  /join [项目] [pm|member] 申请加入项目\n"
+        "  /clear                   清除当前会话历史\n"
+        "  /version                 查看版本号\n"
+        "  /help                    显示本说明\n"
+    )
+    if role in ("unknown", "pending"):
+        return common + "\n（注册并审批通过后可使用更多功能）"
+
+    pm_section = (
+        "\nPM / 管理员可用：\n"
+        "  /note [内容]             快速记录笔记到知识库\n"
+        "  /todo list               查看进行中的待办\n"
+        "  /todo list all           查看全部待办（含已完成）\n"
+        "  /todo list risk [ID]     查看某风险关联的待办\n"
+        "  /todo list plan [ID]     查看某里程碑挂载的待办\n"
+        "  /todo [内容]              新建独立待办\n"
+        "  /todo [内容] risk [ID]   从 risk 分解新建待办\n"
+        "  /todo [内容] plan [ID]   挂到里程碑新建待办\n"
+        "  /todo done [ID]          标记待办完成\n"
+        "  /todo cancel [ID]        取消待办\n"
+    )
+
+    if role == "member":
+        return common + "\n（你的角色为项目成员，可直接 @Bot 咨询项目相关问题）"
+
+    if role == "pm":
+        return common + pm_section
+
+    # super_admin
+    admin_section = (
+        "\n管理员专用：\n"
+        "  /admin stats                              系统统计\n"
+        "  /admin user list/show/role/approve/reject/remove\n"
+        "  /admin project list/add/close/open/bind/unbind\n"
+        "  /admin risk list/close/reopen/owner/add\n"
+        "  /admin fact list/show/update/archive/delete/add/decompose\n"
+        "  /admin assumption list/show/add/update/archive/delete\n"
+        "  /admin org list/add\n"
+    )
+    return common + pm_section + admin_section
 
 
 def _admin_help() -> str:
     return (
         "管理员命令：\n"
+        "/admin stats                              系统统计\n"
+        "/admin user list/show/role/approve/reject/remove\n"
+        "/admin project list/add/close/open\n"
         "/admin risk list/close/reopen/owner/add\n"
         "/admin fact list/show/update/archive/delete/add\n"
         "/admin fact decompose [ID]   AI 分解 risk 为待办\n"
         "/admin assumption list/show/add/update/archive/delete\n"
         "/admin org list/add\n\n"
-        "所有人可用：/todo list/done/cancel/[新建内容]"
+        "PM/管理员：/todo list/done/cancel/[内容]  /note [内容]"
     )

@@ -212,6 +212,106 @@ def card_skipped_response() -> dict:
     }
 
 
+async def send_card_to_user(open_id: str, card: dict, app_id: str, app_secret: str):
+    """向指定用户发送交互卡片（直接消息）。"""
+    token = await get_tenant_token(app_id, app_secret)
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{FEISHU_BASE}/im/v1/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"receive_id_type": "open_id"},
+            json={"receive_id": open_id, "msg_type": "interactive",
+                  "content": json.dumps(card)},
+        )
+
+
+def build_approval_card(open_id: str, name: str, role: str, project: str) -> dict:
+    """构建用户注册审批卡片（发给管理员）。"""
+    _ROLE_ZH = {"pm": "项目经理 PM", "member": "普通成员"}
+    role_zh = _ROLE_ZH.get(role, role)
+    return {
+        "config": {"wide_screen_mode": False, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": "📋 新用户注册申请"},
+            "template": "blue",
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "fields": [
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**申请人**\n{name}"}},
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**申请角色**\n{role_zh}"}},
+                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**申请项目**\n{project}"}},
+                    {"is_short": True, "text": {"tag": "lark_md",
+                                                "content": f"**open_id**\n`{open_id}`"}},
+                ],
+            },
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "✅ 批准"},
+                        "type": "primary",
+                        "value": {
+                            "action": "approve_user",
+                            "open_id": open_id,
+                            "name": name,
+                            "role": role,
+                            "project": project,
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "❌ 拒绝"},
+                        "type": "danger",
+                        "value": {
+                            "action": "reject_user",
+                            "open_id": open_id,
+                            "name": name,
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def card_approved_response(name: str, role: str, project: str) -> dict:
+    _ROLE_ZH = {"pm": "项目经理 PM", "member": "普通成员"}
+    return {
+        "toast": {"type": "success", "content": f"已批准 {name}"},
+        "card": {
+            "type": "raw",
+            "data": {
+                "config": {"enable_forward": False},
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md",
+                             "content": f"✅ 已批准 **{name}** 以「{_ROLE_ZH.get(role, role)}」身份加入「{project}」"},
+                }],
+            },
+        },
+    }
+
+
+def card_rejected_response(name: str) -> dict:
+    return {
+        "toast": {"type": "info", "content": f"已拒绝 {name}"},
+        "card": {
+            "type": "raw",
+            "data": {
+                "config": {"enable_forward": False},
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"❌ 已拒绝 **{name}** 的申请"},
+                }],
+            },
+        },
+    }
+
+
 def _split(text: str, limit: int) -> list[str]:
     if len(text) <= limit:
         return [text]

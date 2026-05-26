@@ -25,27 +25,61 @@ _ROLE = """你是东软睿驰自动驾驶团队的内部PM助手，专门帮助P
 - 当用户提供事实类信息（人员分工、里程碑节点、风险、决策等），不要说"已记录"、"已保存"、"我会记住"等暗示已持久化的话，系统会自动提示用户确认是否保存到知识库
 - 信息提取和保存由系统后台处理，你的职责是理解并给出建议，不是替代存储动作"""
 
+# 管理员额外权限说明（注入 system prompt）
+_ADMIN_EXTRA = """
+---
+## 【管理员权限说明】
+当前用户为系统管理员，你可以帮助其了解和分析系统内部数据。
+数据库主要表结构：
+- users: 用户注册（open_id, name, role[super_admin/pm/member/pending], project, status[active/pending/inactive]）
+- projects: 项目列表（name, description, active）
+- facts: 项目事项（type, dimension, title, body, status, priority, owner, due_date）
+- todos: 待办事项（title, status, priority, owner, source_fact_id, plan_id）
+- assumptions: 预设背景知识（scope, title, body, confidence[universal/common/assumed]）
+- org_units: 组织结构（type, name, parent_id, feishu_id）
+- conversations: 对话历史（chat_id, role, content）
+当前 AI 上下文已注入全部 active 条目详情，管理员也可使用 /admin 系列命令查询实际数据。"""
+
+# 成员版角色说明（轻量，不涉及PM专属工作流）
+_ROLE_MEMBER = """你是东软睿驰自动驾驶团队的内部助手。你可以回答关于团队、项目背景、工作流程的问题，提供一般性建议。
+回答风格：简洁友好，聚焦团队和项目背景知识，不涉及PM内部工作细节。"""
+
 _CONTEXT_TEMPLATE = """{role}
 
-{dept_section}{project_section}{todos_section}{risk_section}{schedule_section}{decision_section}{ref_section}"""
+{sender_section}{dept_section}{project_section}{todos_section}{risk_section}{schedule_section}{decision_section}{ref_section}"""
 
 
-def _build_system(context: dict) -> str:
+def _build_system(context: dict, sender_info: str = "", role: str = "pm") -> str:
     def section(title: str, content: str) -> str:
         if not content:
             return ""
         return f"\n---\n## {title}\n{content}\n"
 
+    if role == "member":
+        base_role = _ROLE_MEMBER
+        todos_section    = ""
+        risk_section     = ""
+        decision_section = ""
+    elif role == "super_admin":
+        base_role    = _ROLE + _ADMIN_EXTRA
+        todos_section    = section("待办事项（带追溯和时间信息）", context.get("todos", ""))
+        risk_section     = section("当前活跃风险与问题", context.get("risks") or "（暂无已登记风险）")
+        decision_section = section("关键决策记录", context.get("decisions", ""))
+    else:  # pm
+        base_role    = _ROLE
+        todos_section    = section("待办事项（带追溯和时间信息）", context.get("todos", ""))
+        risk_section     = section("当前活跃风险与问题", context.get("risks") or "（暂无已登记风险）")
+        decision_section = section("关键决策记录", context.get("decisions", ""))
+
+    sender_section   = section("当前对话用户", sender_info) if sender_info else ""
     dept_section     = section("部门预设（团队公认背景知识）", context.get("dept_assumptions", ""))
     project_section  = section("当前项目背景", context.get("project_assumptions", ""))
-    todos_section    = section("待办事项（带追溯和时间信息）", context.get("todos", ""))
-    risk_section     = section("当前活跃风险与问题", context.get("risks") or "（暂无已登记风险）")
     schedule_section = section("里程碑与计划节点", context.get("schedule", ""))
-    decision_section = section("关键决策记录", context.get("decisions", ""))
     ref_section      = section("相关方与参考信息", context.get("references", ""))
 
     return _CONTEXT_TEMPLATE.format(
-        role=_ROLE,
+        role=base_role,
+        sender_section=sender_section,
         dept_section=dept_section,
         project_section=project_section,
         todos_section=todos_section,
@@ -56,8 +90,9 @@ def _build_system(context: dict) -> str:
     )
 
 
-async def chat(history: list[dict], context: dict) -> str:
-    system = _build_system(context)
+async def chat(history: list[dict], context: dict,
+               sender_info: str = "", role: str = "pm") -> str:
+    system = _build_system(context, sender_info=sender_info, role=role)
     response = await _client.chat.completions.create(
         model=AI_MODEL,
         max_tokens=4000,

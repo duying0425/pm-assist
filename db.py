@@ -112,6 +112,11 @@ def init_db():
                 items_json  TEXT    NOT NULL,
                 created_at  INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS chat_bindings (
+                chat_id    TEXT    PRIMARY KEY,
+                project    TEXT    NOT NULL,
+                created_at TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            );
             CREATE TABLE IF NOT EXISTS todos (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 title           TEXT    NOT NULL,
@@ -127,6 +132,24 @@ def init_db():
                 created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
                 updated_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
             );
+            CREATE TABLE IF NOT EXISTS users (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                open_id     TEXT    UNIQUE NOT NULL,
+                name        TEXT    NOT NULL DEFAULT '',
+                role        TEXT    NOT NULL DEFAULT 'pending',
+                project     TEXT    NOT NULL DEFAULT '',
+                status      TEXT    NOT NULL DEFAULT 'pending',
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE IF NOT EXISTS projects (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT    UNIQUE NOT NULL,
+                description TEXT    NOT NULL DEFAULT '',
+                created_by  TEXT    NOT NULL DEFAULT '',
+                active      INTEGER NOT NULL DEFAULT 1,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            );
         """)
         # upgrade: add dimension column if coming from old schema
         try:
@@ -135,6 +158,8 @@ def init_db():
             pass
         _migrate_legacy(conn)
         _migrate_dimension(conn)
+        _seed_initial_project(conn)
+        _migrate_project_names(conn)
 
 
 def _migrate_legacy(conn):
@@ -193,6 +218,27 @@ def _migrate_dimension(conn):
         )
 
 
+def _migrate_project_names(conn):
+    """将 facts/todos 中英文 project='yadi' 统一改为中文名 '雅迪'，幂等。"""
+    conn.execute("UPDATE facts SET project='雅迪' WHERE project='yadi'")
+    conn.execute("UPDATE todos SET project='雅迪' WHERE project='yadi'")
+
+
+def _seed_initial_project(conn):
+    """确保系统预置项目存在，幂等。"""
+    existing = {r[0] for r in conn.execute("SELECT name FROM projects").fetchall()}
+    if "默认" not in existing:
+        conn.execute(
+            "INSERT INTO projects(name, description, created_by) VALUES(?,?,?)",
+            ("默认", "系统默认项目", "system"),
+        )
+    if "雅迪" not in existing:
+        conn.execute(
+            "INSERT INTO projects(name, description, created_by) VALUES(?,?,?)",
+            ("雅迪", "雅迪自动驾驶量产项目", "system"),
+        )
+
+
 # ── 事件去重 ───────────────────────────────────────────────
 
 def is_processed(event_id: str) -> bool:
@@ -237,7 +283,7 @@ def clear_history(chat_id: str):
 
 def add_fact(type_: str, title: str, body: str, status: str = "active",
              priority: str = "", owner: str = "", due_date: str = "",
-             project: str = "yadi", source: str = "manual") -> int:
+             project: str = "默认", source: str = "manual") -> int:
     dimension = TYPE_TO_DIMENSION.get(type_, "scope")
     with get_conn() as conn:
         cur = conn.execute(
@@ -432,7 +478,7 @@ def upsert_person(open_id: str, name: str):
 # ── Todos CRUD ────────────────────────────────────────────
 
 def add_todo(title: str, body: str = "", priority: str = "medium", owner: str = "",
-             due_date: str = "", project: str = "yadi",
+             due_date: str = "", project: str = "默认",
              source_fact_id: int | None = None, plan_id: int | None = None,
              source: str = "manual") -> int:
     with get_conn() as conn:
@@ -464,7 +510,7 @@ def update_todo(todo_id: int, **kwargs):
         )
 
 
-def list_todos(status: str | None = "open", project: str | None = "yadi",
+def list_todos(status: str | None = "open", project: str | None = None,
                source_fact_id: int | None = None, plan_id: int | None = None) -> list:
     clauses, params = [], []
     if status:
@@ -488,7 +534,7 @@ def list_todos(status: str | None = "open", project: str | None = "yadi",
         ).fetchall()
 
 
-def get_todos_for_context(project: str = "yadi",
+def get_todos_for_context(project: str = "默认",
                           open_limit: int = 30,
                           done_limit: int = 10,
                           done_days: int = 14) -> str:
@@ -582,7 +628,7 @@ def get_todos_for_context(project: str = "yadi",
 
 # ── AI 上下文拼装（三层结构）─────────────────────────────────
 
-def get_full_context(project: str = "yadi") -> dict:
+def get_full_context(project: str = "默认") -> dict:
     """返回结构化上下文供 AI 使用。
     Layer 0: 部门预设假设（总是注入）
     Layer 1: 项目级假设
@@ -686,7 +732,7 @@ def get_full_context(project: str = "yadi") -> dict:
             return ""
         parts = []
         for r in rows:
-            updated = r["updated_at"][:10] if r.get("updated_at") else ""
+            updated = r["updated_at"][:10] if r["updated_at"] else ""
             header = f"【{r['title']}】" + (f"（更新:{updated}）" if updated else "")
             parts.append(f"{header}\n{r['body']}")
         return "\n\n".join(parts)
@@ -718,7 +764,7 @@ def get_knowledge_text() -> str:
     return "\n\n".join(sections)
 
 
-def get_risks_text(project: str = "yadi") -> str:
+def get_risks_text(project: str = "默认") -> str:
     return get_full_context(project)["risks"]
 
 
@@ -798,13 +844,13 @@ def count_notes() -> int:
 
 def add_risk(type_: str, title: str, description: str,
              owner: str = "", priority: str = "medium",
-             due_date: str = "", project: str = "yadi") -> int:
+             due_date: str = "", project: str = "默认") -> int:
     return add_fact(type_, title, description,
                     priority=priority, owner=owner, due_date=due_date,
                     project=project, source="manual")
 
 
-def list_risks(status: str | None = None, project: str = "yadi") -> list:
+def list_risks(status: str | None = None, project: str = "默认") -> list:
     db_status = _RISK_STATUS_IN.get(status, status) if status else None
     with get_conn() as conn:
         base = (
@@ -879,6 +925,163 @@ def get_latest_nightly_review() -> str | None:
             " ORDER BY id DESC LIMIT 1"
         ).fetchone()
     return row["body"] if row else None
+
+
+# ── 群聊项目绑定 ──────────────────────────────────────────
+
+def get_chat_binding(chat_id: str) -> str | None:
+    """返回群聊绑定的项目名，未绑定返回 None。"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT project FROM chat_bindings WHERE chat_id=?", (chat_id,)
+        ).fetchone()
+    return row["project"] if row else None
+
+
+def set_chat_binding(chat_id: str, project: str):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO chat_bindings(chat_id, project) VALUES(?,?)",
+            (chat_id, project),
+        )
+
+
+def delete_chat_binding(chat_id: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM chat_bindings WHERE chat_id=?", (chat_id,))
+
+
+def list_chat_bindings() -> list:
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM chat_bindings ORDER BY chat_id").fetchall()
+
+
+# ── 用户管理 CRUD ─────────────────────────────────────────
+
+def get_user(open_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM users WHERE open_id=?", (open_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_user(open_id: str, name: str = "", role: str = "pending",
+                project: str = "", status: str = "pending") -> int:
+    """插入或更新用户（以 open_id 为唯一键）。"""
+    with get_conn() as conn:
+        row = conn.execute("SELECT id FROM users WHERE open_id=?", (open_id,)).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE users SET name=?, role=?, project=?, status=?,"
+                " updated_at=datetime('now','localtime') WHERE open_id=?",
+                (name, role, project, status, open_id),
+            )
+            return row["id"]
+        cur = conn.execute(
+            "INSERT INTO users(open_id, name, role, project, status) VALUES(?,?,?,?,?)",
+            (open_id, name, role, project, status),
+        )
+        return cur.lastrowid
+
+
+def update_user(open_id: str, **kwargs):
+    allowed = {"name", "role", "project", "status"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values())
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE users SET {sets}, updated_at=datetime('now','localtime') WHERE open_id=?",
+            (*vals, open_id),
+        )
+
+
+def list_users(role: str | None = None, status: str | None = None) -> list:
+    clauses, params = [], []
+    if role:
+        clauses.append("role=?")
+        params.append(role)
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with get_conn() as conn:
+        return conn.execute(
+            f"SELECT * FROM users {where} ORDER BY role, name", params
+        ).fetchall()
+
+
+def delete_user(open_id: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM users WHERE open_id=?", (open_id,))
+
+
+# ── 项目管理 CRUD ─────────────────────────────────────────
+
+def get_project_by_name(name: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM projects WHERE name=?", (name,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_project(project_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def add_project(name: str, description: str = "", created_by: str = "") -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO projects(name, description, created_by) VALUES(?,?,?)",
+            (name, description, created_by),
+        )
+        return cur.lastrowid
+
+
+def list_projects(active_only: bool = True) -> list:
+    with get_conn() as conn:
+        if active_only:
+            return conn.execute(
+                "SELECT * FROM projects WHERE active=1 ORDER BY id"
+            ).fetchall()
+        return conn.execute("SELECT * FROM projects ORDER BY id").fetchall()
+
+
+def update_project(project_id: int, **kwargs):
+    allowed = {"name", "description", "active"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values())
+    with get_conn() as conn:
+        conn.execute(f"UPDATE projects SET {sets} WHERE id=?", (*vals, project_id))
+
+
+# ── 系统统计 ──────────────────────────────────────────────
+
+def get_system_stats() -> dict:
+    with get_conn() as conn:
+        user_rows = conn.execute("SELECT role, status, COUNT(*) as cnt FROM users GROUP BY role, status").fetchall()
+        project_count = conn.execute("SELECT COUNT(*) FROM projects WHERE active=1").fetchone()[0]
+        fact_rows = conn.execute(
+            "SELECT type, COUNT(*) as cnt FROM facts WHERE status='active' GROUP BY type"
+        ).fetchall()
+        todo_rows = conn.execute(
+            "SELECT status, COUNT(*) as cnt FROM todos GROUP BY status"
+        ).fetchall()
+        review_row = conn.execute(
+            "SELECT created_at FROM facts WHERE type='report' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return {
+        "users": [dict(r) for r in user_rows],
+        "project_count": project_count,
+        "facts": [dict(r) for r in fact_rows],
+        "todos": [dict(r) for r in todo_rows],
+        "last_review": review_row["created_at"][:10] if review_row else "无",
+    }
 
 
 def pop_pending_item(chat_id: str, index: int) -> tuple[dict | None, list[dict]]:
