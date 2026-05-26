@@ -809,7 +809,7 @@ async def _handle_message(event: dict):
         await feishu.send_text(chat_id, f"pm-assist v{_VERSION}", FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
-    if text == "/register":
+    if text == "/start":
         await feishu.send_text(chat_id, _register_text(), FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
@@ -823,14 +823,14 @@ async def _handle_message(event: dict):
         await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
-    # ── 未注册/待审批用户：仅允许 /register /join /help /version ──
+    # ── 未注册/待审批用户：仅允许 /start /join /help /version ──
     if user_role in ("unknown", "pending") or user_status not in ("active",):
         if user_status == "pending":
             msg = "你的注册申请正在等待管理员审批，批准后即可使用全部功能。"
         elif user_status == "rejected":
             msg = "你的注册申请已被拒绝，如有疑问请联系管理员。"
         else:
-            msg = "你尚未注册，请发送 /register 查看注册说明。"
+            msg = "你尚未注册，请发送 /start 开始注册。"
         await feishu.send_text(chat_id, msg, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
@@ -956,7 +956,7 @@ async def _handle_join(text: str, sender_open_id: str, user: dict) -> str:
     """处理 /join [项目] [pm|member] 申请注册。"""
     parts = text.split()
     if len(parts) < 3:
-        return "用法：/join [项目名] [pm|member]\n例：/join 雅迪 pm\n\n发 /register 查看可用项目列表。"
+        return "用法：/join [项目名] [pm|member]\n例：/join 雅迪 pm\n\n发 /start 查看可用项目列表。"
 
     project_name = parts[1]
     role_req = parts[2].lower()
@@ -1024,7 +1024,7 @@ def _handle_leave(sender_open_id: str, user: dict) -> str:
     name = user.get("name", sender_open_id[:8])
     return (f"✅ 已退出项目「{project}」。\n"
             f"角色已变更为普通成员，AI 对话仍可继续使用。\n"
-            f"如需加入新项目，发 /register 查看可用项目列表。")
+            f"如需加入新项目，发 /start 查看可用项目列表。")
 
 
 async def _extract_and_card(chat_id: str, text: str, project: str = "默认"):
@@ -1907,7 +1907,7 @@ def _help_text(role: str = "unknown") -> str:
         "pm-assist 使用说明\n\n"
         "所有人可用：\n"
         "  @Bot [消息]              AI对话\n"
-        "  /register                查看注册说明与可用项目\n"
+        "  /start                   查看可用项目并申请加入\n"
         "  /join [项目] [pm|member] 申请加入项目\n"
         "  /leave                   退出当前项目绑定\n"
         "  /clear                   清除当前会话历史\n"

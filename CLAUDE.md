@@ -263,10 +263,10 @@ key / value / updated_at
 | `super_admin` | .env `ADMIN_OPEN_IDS` 自动注册，或管理员手动提升 | 全部功能 + /admin 系列 + AI 数据查询 |
 | `pm` | 用户申请，管理员审批 | 当前 PM 工作模式（知识库、todo、AI 提取卡片） |
 | `member` | 用户申请，管理员审批 | 轻量 AI 对话（不注入 todos/risks，不触发提取卡片） |
-| `pending` | 已申请未审批 | 仅 /register /join /help /version |
+| `pending` | 已申请未审批 | 仅 /start /join /help /version |
 
 ### 注册流程
-1. 用户发 `/register` 查看项目列表
+1. 用户发 `/start` 查看项目列表
 2. 发 `/join [项目名] [pm|member]` 提交申请
 3. 主管理员（`PRIMARY_ADMIN_OPEN_ID`）收到飞书审批卡片
 4. 点击「批准」→ 用户状态改为 active + 通知用户；点击「拒绝」→ 通知用户被拒
@@ -329,6 +329,8 @@ key / value / updated_at
 31. **管理员命令各级提示完善**：`/admin fact` 不完整时提示中补充 `decompose` 子命令（v0.7.3）
 32. **注册审批卡片显示真实姓名**：调用飞书 contact API 查询申请人姓名，不再显示 open_id 前缀（v0.7.4）
 33. **项目绑定管理**：管理员可用 `/admin user project [open_id] [项目名|-]` 修改或清除用户项目绑定；用户可用 `/leave` 自助退出当前项目（v0.7.4）
+34. **`/register` 改名为 `/start`**：新用户入口命令更符合 Bot 惯例，语义更准确（v0.7.5）
+35. **Web 后台操作按钮列对齐修复**：知识库/待办/用户/预设各表的编辑归档按钮列正确对齐（v0.7.5）
 
 ## 命令速查
 
@@ -344,6 +346,8 @@ key / value / updated_at
 /todo [内容] plan [ID]   挂到里程碑新建待办
 /todo done [ID]          标记待办完成
 /todo cancel [ID]        取消待办
+/start                   查看可用项目并申请加入（新用户入口）
+/join [项目名] [pm|member] 提交加入申请
 /note [内容]             快速记录笔记到知识库
 /version                 查看当前版本号
 /clear                   清除当前会话历史
@@ -435,7 +439,7 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - Web 后台概览页可切换洗盘模式，但没有单独登录认证，仍按内部工具处理
 
 ## 服务器当前状态
-- v0.7.4 已部署（注册审批卡片显示真实姓名 + /leave 命令 + /admin user project 命令）
+- v0.7.5 已部署（/register 改名 /start + Web 后台按钮列对齐修复）
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
 - todos/users/projects/system_settings 表由 `init_db()` 自动创建，无需手动迁移

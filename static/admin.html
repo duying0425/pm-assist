@@ -335,7 +335,7 @@ async function loadFacts(){
     <td>${pbdg(f.priority)}</td>
     <td>${fsbdg(f.status)}</td>
     <td class="date">${fd(f.updated_at)}</td>
-    <td class="actions"><button class="btn btn-sm" onclick="editFact(${f.id})">编辑</button>${f.status!=='archived'?`<button class="btn btn-sm btn-danger-ghost" onclick="archiveFact(${f.id})">归档</button>`:''}</td>
+    <td><div class="actions"><button class="btn btn-sm" onclick="editFact(${f.id})">编辑</button>${f.status!=='archived'?`<button class="btn btn-sm btn-danger-ghost" onclick="archiveFact(${f.id})">归档</button>`:''}</div></td>
   </tr>`).join('');
 }
 function openAddFact(){
@@ -379,7 +379,7 @@ async function loadTodos(){
     <td>${pbdg(t.priority)}</td>
     <td class="date">${fd(t.due_date)}</td>
     <td>${tsbdg(t.status)}</td>
-    <td class="actions"><button class="btn btn-sm" onclick="editTodo(${t.id})">编辑</button>${t.status==='open'?`<button class="btn btn-sm btn-success-ghost" onclick="doneTodo(${t.id})">完成</button>`:''}</td>
+    <td><div class="actions"><button class="btn btn-sm" onclick="editTodo(${t.id})">编辑</button>${t.status==='open'?`<button class="btn btn-sm btn-success-ghost" onclick="doneTodo(${t.id})">完成</button>`:''}</div></td>
   </tr>`).join('');
 }
 function openAddTodo(){
@@ -416,10 +416,10 @@ async function loadUsers(){
     <td>${esc(u.project||'—')}</td>
     <td>${usbdg(u.status)}</td>
     <td class="date">${fd(u.created_at)}</td>
-    <td class="actions">${u.status==='pending'
+    <td><div class="actions">${u.status==='pending'
       ?`<button class="btn btn-sm btn-success-ghost" onclick="approveUser('${escA(u.open_id)}','${escA(u.role)}','${escA(u.project)}')">批准</button><button class="btn btn-sm btn-danger-ghost" onclick="rejectUser('${escA(u.open_id)}')">拒绝</button>`
       :`<button class="btn btn-sm" onclick="editUser('${escA(u.open_id)}')">编辑</button>`
-    }</td>
+    }</div></td>
   </tr>`).join('');
 }
 async function approveUser(oid,role,project){await api('PATCH',`/users/${encodeURIComponent(oid)}`,{status:'active',role,project});loadUsers();}
@@ -449,7 +449,7 @@ async function loadAssumptions(){
     <td>${scbdg(a.scope,a.scope_ref)}</td>
     <td>${cfbdg(a.confidence)}</td>
     <td><div class="title-cell">${esc(a.title)}</div><div class="body-preview">${esc((a.body||'').slice(0,60))}${(a.body||'').length>60?'…':''}</div></td>
-    <td class="actions"><button class="btn btn-sm" onclick="editAssumption(${a.id})">编辑</button>${a.active?`<button class="btn btn-sm btn-danger-ghost" onclick="archiveAssumption(${a.id})">归档</button>`:''}</td>
+    <td><div class="actions"><button class="btn btn-sm" onclick="editAssumption(${a.id})">编辑</button>${a.active?`<button class="btn btn-sm btn-danger-ghost" onclick="archiveAssumption(${a.id})">归档</button>`:''}</div></td>
   </tr>`).join('');
 }
 function openAddAssumption(){openModal('新增预设假设',assumptionForm(),async()=>{await api('POST','/assumptions',collectAssumption());loadAssumptions();});}
