@@ -313,8 +313,12 @@ async function loadStats(){
     <div class="mini-grid">
       <div class="mini-card"><h4>知识库分布</h4>${Object.entries(TYPE_ZH).filter(([t])=>fm[t]).map(([t])=>`<div class="mini-row">${tbdg(t)}<span>${fm[t]} 条</span></div>`).join('')||'<span style="color:var(--muted)">暂无</span>'}</div>
       <div class="mini-card"><h4>待办统计</h4>${['open','done','cancelled'].map(s=>`<div class="mini-row">${tsbdg(s)}<span>${tm[s]||0} 条</span></div>`).join('')}</div>
-      <div class="mini-card"><h4>最近 AI 洗盘</h4><div style="color:var(--muted);font-size:13px">${esc(stats.last_review)}</div></div>
+      <div class="mini-card"><h4>最近 AI 洗盘</h4><div style="color:var(--muted);font-size:13px;margin-bottom:10px">${esc(stats.last_review)}</div><div class="mini-row"><span>模式</span><strong>${stats.review_mode==='direct_cleanup'?'直接清洗':'仅报告'}</strong></div><div style="display:flex;gap:6px;margin-top:10px"><button class="btn btn-sm ${stats.review_mode==='report_only'?'btn-primary':''}" onclick="setReviewMode('report_only')">仅报告</button><button class="btn btn-sm ${stats.review_mode==='direct_cleanup'?'btn-primary':''}" onclick="setReviewMode('direct_cleanup')">直接清洗</button></div></div>
     </div>`;
+}
+async function setReviewMode(mode){
+  await api('PATCH','/settings/review-mode',{mode});
+  loadStats();
 }
 
 // ── Facts ─────────────────────────────────────────────────

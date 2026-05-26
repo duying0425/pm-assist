@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 
 from openai import AsyncOpenAI
@@ -144,6 +146,7 @@ _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析
 输出格式要求：
 - 每类问题独立一节，发现几条写几条，无问题可跳过该节
 - 每条建议附上可直接执行的 /admin fact 命令（如 /admin fact archive 3）
+- 命令必须单独一行，不要在命令后追加解释文字，便于系统直接执行
 - 末尾给出整体数据健康评分：优 / 良 / 待改善，并说明理由（一句话）
 
 项目信息库（共 {count} 条 active 条目）：

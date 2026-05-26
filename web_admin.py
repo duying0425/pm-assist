@@ -22,6 +22,15 @@ def api_stats():
     return db.get_system_stats()
 
 
+@router.patch("/api/settings/review-mode")
+def api_update_review_mode(data: dict):
+    mode = data.get("mode", "")
+    if mode not in ("report_only", "direct_cleanup"):
+        return {"error": "mode must be report_only or direct_cleanup"}
+    db.set_setting("nightly_review_mode", mode)
+    return {"ok": True, "mode": mode}
+
+
 @router.get("/api/projects")
 def api_list_projects():
     return [dict(r) for r in db.list_projects(active_only=False)]

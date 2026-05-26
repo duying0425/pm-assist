@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 import sqlite3
 from datetime import datetime
@@ -149,6 +151,11 @@ def init_db():
                 created_by  TEXT    NOT NULL DEFAULT '',
                 active      INTEGER NOT NULL DEFAULT 1,
                 created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key         TEXT    PRIMARY KEY,
+                value       TEXT    NOT NULL DEFAULT '',
                 updated_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
             );
             CREATE INDEX IF NOT EXISTS idx_facts_status_project    ON facts(status, project);
@@ -787,7 +794,7 @@ def get_all_facts_for_review() -> str:
     _PRIO_ZH = {"high": "高", "medium": "中", "low": "低"}
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, type, dimension, title, body, priority, owner, due_date, updated_at"
+            "SELECT id, type, dimension, title, body, priority, owner, due_date, project, updated_at"
             " FROM facts WHERE status='active' AND type != 'report' ORDER BY dimension, type, id"
         ).fetchall()
     if not rows:
@@ -798,8 +805,9 @@ def get_all_facts_for_review() -> str:
         prio  = f" 优先级:{_PRIO_ZH.get(r['priority'], r['priority'])}" if r["priority"] else ""
         owner = f" 负责人:{r['owner']}" if r["owner"] else ""
         due   = f" 截止:{r['due_date']}" if r["due_date"] else ""
+        project = f" 项目:{r['project']}" if r["project"] else ""
         updated = r["updated_at"][:10] if r["updated_at"] else "未知"
-        lines.append(f"#{r['id']} [{type_label}/{r['dimension']}]{prio}{owner}{due} 最后更新:{updated}")
+        lines.append(f"#{r['id']} [{type_label}/{r['dimension']}]{project}{prio}{owner}{due} 最后更新:{updated}")
         lines.append(f"  标题: {r['title']}")
         lines.append(f"  正文: {r['body'][:200]}")
         lines.append("")
@@ -956,6 +964,21 @@ def get_latest_nightly_review() -> str | None:
     return row["body"] if row else None
 
 
+def get_setting(key: str, default: str = "") -> str:
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM system_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO system_settings(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now','localtime')",
+            (key, value),
+        )
+
+
 # ── 群聊项目绑定 ──────────────────────────────────────────
 
 def get_chat_binding(chat_id: str) -> str | None:
@@ -1099,7 +1122,7 @@ def get_system_stats() -> dict:
         user_rows = conn.execute("SELECT role, status, COUNT(*) as cnt FROM users GROUP BY role, status").fetchall()
         project_count = conn.execute("SELECT COUNT(*) FROM projects WHERE active=1").fetchone()[0]
         fact_rows = conn.execute(
-            "SELECT type, COUNT(*) as cnt FROM facts WHERE status='active' GROUP BY type"
+            "SELECT type, COUNT(*) as cnt FROM facts WHERE status='active' AND type!='report' GROUP BY type"
         ).fetchall()
         todo_rows = conn.execute(
             "SELECT status, COUNT(*) as cnt FROM todos GROUP BY status"
@@ -1113,6 +1136,7 @@ def get_system_stats() -> dict:
         "facts": [dict(r) for r in fact_rows],
         "todos": [dict(r) for r in todo_rows],
         "last_review": review_row["created_at"][:10] if review_row else "无",
+        "review_mode": get_setting("nightly_review_mode", "report_only"),
     }
 
 

@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -45,18 +48,125 @@ _SCOPE_LABELS = {"dept": "部门", "project": "项目", "client": "客户", "glo
 
 
 _scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+_REVIEW_MODE_KEY = "nightly_review_mode"
+_REVIEW_MODE_REPORT = "report_only"
+_REVIEW_MODE_DIRECT = "direct_cleanup"
+_REVIEW_MODE_ALIASES = {
+    "report": _REVIEW_MODE_REPORT,
+    "report_only": _REVIEW_MODE_REPORT,
+    "only_report": _REVIEW_MODE_REPORT,
+    "仅报告": _REVIEW_MODE_REPORT,
+    "direct": _REVIEW_MODE_DIRECT,
+    "direct_cleanup": _REVIEW_MODE_DIRECT,
+    "cleanup": _REVIEW_MODE_DIRECT,
+    "直接清洗": _REVIEW_MODE_DIRECT,
+}
+
+
+def _review_mode_label(mode: str) -> str:
+    return "直接清洗" if mode == _REVIEW_MODE_DIRECT else "仅报告"
+
+
+def _get_review_mode() -> str:
+    mode = db.get_setting(_REVIEW_MODE_KEY, _REVIEW_MODE_REPORT)
+    return mode if mode in {_REVIEW_MODE_REPORT, _REVIEW_MODE_DIRECT} else _REVIEW_MODE_REPORT
+
+
+def _normalize_review_mode(value: str) -> str | None:
+    return _REVIEW_MODE_ALIASES.get(value.strip().lower())
+
+
+def _apply_review_commands(report: str) -> list[str]:
+    """Execute a conservative allowlist of /admin fact commands from the AI report."""
+    allowed_update = {"status", "owner", "priority", "due_date", "title", "body"}
+    results: list[str] = []
+    seen: set[str] = set()
+    pattern = re.compile(r"/admin\s+fact\s+(archive|update)\s+(\d+)(?:\s+([a-zA-Z_]+)\s+(.+))?")
+    for line in report.splitlines():
+        match = pattern.search(line)
+        if not match:
+            continue
+        raw_cmd = match.group(0).strip()
+        if raw_cmd in seen:
+            continue
+        seen.add(raw_cmd)
+
+        action, fid_s, field, value = match.groups()
+        fid = int(fid_s)
+        fact = db.get_fact(fid)
+        if not fact:
+            results.append(f"跳过：找不到 #{fid}（{raw_cmd}）")
+            continue
+
+        if action == "archive":
+            db.update_fact(fid, status="archived")
+            results.append(f"已归档 #{fid}：{fact['title']}")
+            continue
+
+        if not field or value is None:
+            results.append(f"跳过：update 命令缺少字段或值（{raw_cmd}）")
+            continue
+        field = field.lower()
+        if field not in allowed_update:
+            results.append(f"跳过：不允许更新字段 {field}（#{fid}）")
+            continue
+        value = value.strip().strip("`'\"，,。；;）)")
+        if field == "status":
+            value = {"open": "active", "closed": "resolved"}.get(value, value)
+            if value not in {"active", "resolved", "archived"}:
+                results.append(f"跳过：非法状态 {value}（#{fid}）")
+                continue
+        if field == "priority" and value not in {"high", "medium", "low"}:
+            results.append(f"跳过：非法优先级 {value}（#{fid}）")
+            continue
+        db.update_fact(fid, **{field: value})
+        results.append(f"已更新 #{fid}.{field} = {value}")
+
+    if not results:
+        results.append("未发现可执行的白名单命令，未修改数据。")
+    return results
+
+
+async def _build_and_save_review(mode: str | None = None) -> str | None:
+    facts_text = db.get_all_facts_for_review()
+    if not facts_text:
+        log.info("nightly review: no active facts to review")
+        return None
+
+    effective_mode = mode or _get_review_mode()
+    report = await claude_client.nightly_review(facts_text)
+    if effective_mode == _REVIEW_MODE_DIRECT:
+        results = _apply_review_commands(report)
+        report = (
+            f"{report}\n\n"
+            f"=== 直接清洗执行结果 ===\n"
+            + "\n".join(f"- {r}" for r in results)
+        )
+    db.save_nightly_review(report)
+    log.info("nightly review saved to DB mode=%s", effective_mode)
+    return report
+
+
+def _review_recipients_admins_pm() -> set[str]:
+    recipients = set(ADMIN_OPEN_IDS)
+    for role in ("super_admin", "pm"):
+        for user in db.list_users(role=role, status="active"):
+            if user["open_id"]:
+                recipients.add(user["open_id"])
+    return recipients
+
+
+async def _send_review_to_admins_pm(report: str):
+    recipients = _review_recipients_admins_pm()
+    for uid in recipients:
+        await feishu.send_text_to_user(uid, report, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    log.info("manual review sent to %d admins/PMs: %s", len(recipients), recipients)
 
 
 async def _run_nightly_review():
     """凌晨0:30：AI分析所有facts，清洗报告存入DB。"""
     try:
-        facts_text = db.get_all_facts_for_review()
-        if not facts_text:
-            log.info("nightly review: no active facts to review")
-            return
-        report = await claude_client.nightly_review(facts_text)
-        db.save_nightly_review(report)
-        log.info("nightly review saved to DB")
+        await _build_and_save_review()
     except Exception:
         log.exception("nightly review error")
 
@@ -484,6 +594,8 @@ async def _handle_message(event: dict):
             return
         if text.startswith("/admin fact decompose"):
             reply = await _handle_admin_fact_decompose(text, chat_id=chat_id)
+        elif text.startswith("/admin review run"):
+            reply = await _handle_admin_review_run(text)
         else:
             reply = _handle_admin(text, sender_open_id, project, chat_id)
         await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
@@ -840,6 +952,59 @@ async def _handle_admin_fact_decompose(text: str, chat_id: str = "") -> str:
     return "\n".join(lines)
 
 
+async def _handle_admin_review_run(text: str) -> str:
+    args = text.split()[2:]
+    mode = _get_review_mode()
+    if len(args) >= 2:
+        requested = _normalize_review_mode(args[1])
+        if not requested:
+            return "模式只能是 report/仅报告 或 direct/直接清洗"
+        mode = requested
+
+    report = await _build_and_save_review(mode)
+    if not report:
+        return "当前没有 active 项目信息条目，未生成洗盘报告。"
+
+    await _send_review_to_admins_pm(report)
+    return f"✓ 已完成手动 AI 洗盘（{_review_mode_label(mode)}），报告已发送给管理员和 PM。"
+
+
+def _handle_admin_review(args: list[str]) -> str:
+    sub = args[0].lower() if args else ""
+    current = _get_review_mode()
+
+    if sub in ("", "status"):
+        return (
+            f"当前 AI 洗盘模式：{_review_mode_label(current)}\n"
+            "可用命令：\n"
+            "/admin review mode report     设置为仅报告\n"
+            "/admin review mode direct     设置为直接清洗\n"
+            "/admin review run             立即洗盘并发送给管理员和 PM\n"
+            "/admin review run report      按仅报告模式立即执行一次\n"
+            "/admin review run direct      按直接清洗模式立即执行一次"
+        )
+
+    if sub == "mode":
+        if len(args) < 2:
+            return f"当前 AI 洗盘模式：{_review_mode_label(current)}"
+        mode = _normalize_review_mode(args[1])
+        if not mode:
+            return "模式只能是 report/仅报告 或 direct/直接清洗"
+        db.set_setting(_REVIEW_MODE_KEY, mode)
+        return f"✓ 已设置 AI 洗盘模式：{_review_mode_label(mode)}"
+
+    if sub == "run":
+        return "手动洗盘是异步命令，请使用：/admin review run [report|direct]"
+
+    return (
+        "review 命令：\n"
+        "/admin review status              查看洗盘模式\n"
+        "/admin review mode report         仅生成报告，不改数据\n"
+        "/admin review mode direct         根据白名单命令直接清洗\n"
+        "/admin review run [report|direct] 立即洗盘并发送给管理员和 PM"
+    )
+
+
 # ── 管理员命令 ────────────────────────────────────────────
 
 def _handle_admin(text: str, sender_open_id: str = "",
@@ -914,6 +1079,9 @@ def _handle_admin(text: str, sender_open_id: str = "",
 
     if cmd == "project":
         return _handle_admin_project(admin_args, sender_open_id, chat_id)
+
+    if cmd == "review":
+        return _handle_admin_review(admin_args)
 
     if cmd == "stats":
         return _handle_admin_stats()
@@ -1474,6 +1642,7 @@ def _help_text(role: str = "unknown") -> str:
         "  /admin project list/add/close/open/bind/unbind\n"
         "  /admin risk list/close/reopen/owner/add\n"
         "  /admin fact list/show/update/archive/delete/add/decompose\n"
+        "  /admin review status/mode/run\n"
         "  /admin assumption list/show/add/update/archive/delete\n"
         "  /admin org list/add\n"
     )
@@ -1489,6 +1658,7 @@ def _admin_help() -> str:
         "/admin risk list/close/reopen/owner/add\n"
         "/admin fact list/show/update/archive/delete/add\n"
         "/admin fact decompose [ID]   AI 分解 risk 为待办\n"
+        "/admin review status/mode/run  AI 洗盘配置与手动执行\n"
         "/admin assumption list/show/add/update/archive/delete\n"
         "/admin org list/add\n\n"
         "PM/管理员：/todo list/done/cancel/[内容]  /note [内容]"

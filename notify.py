@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 每日早报模块。
 可作为独立脚本由 crontab 调用：
