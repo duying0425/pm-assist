@@ -868,18 +868,24 @@ def add_risk(type_: str, title: str, description: str,
                     project=project, source="manual")
 
 
-def list_risks(status: str | None = None, project: str = "默认") -> list:
+def list_risks(status: str | None = None, project: str | None = None) -> list:
     db_status = _RISK_STATUS_IN.get(status, status) if status else None
     with get_conn() as conn:
         base = (
             "SELECT id, type, title, body AS description, owner, priority,"
             " status, due_date, project, created_at, updated_at"
-            " FROM facts WHERE project=? AND dimension='risk'"
+            " FROM facts WHERE dimension='risk'"
         )
+        clauses, params = [], []
+        if project is not None:
+            clauses.append("project=?")
+            params.append(project)
         if db_status:
-            rows = conn.execute(base + " AND status=? ORDER BY id", (project, db_status)).fetchall()
-        else:
-            rows = conn.execute(base + " ORDER BY status, id", (project,)).fetchall()
+            clauses.append("status=?")
+            params.append(db_status)
+        where = (" AND " + " AND ".join(clauses)) if clauses else ""
+        order = " ORDER BY id" if db_status else " ORDER BY status, id"
+        rows = conn.execute(base + where + order, params).fetchall()
     result = []
     for r in rows:
         d = dict(r)

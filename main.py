@@ -341,6 +341,7 @@ app.include_router(admin_router)
 @app.post("/webhook/feishu")
 async def feishu_webhook(request: Request, background_tasks: BackgroundTasks):
     body = await request.json()
+    log.info("webhook raw keys=%s event_type=%s", list(body.keys()), body.get("header", {}).get("event_type", body.get("type", "?")))
 
     if body.get("type") == "url_verification":
         if body.get("token") != FEISHU_VERIFICATION_TOKEN:
@@ -373,6 +374,10 @@ async def feishu_webhook(request: Request, background_tasks: BackgroundTasks):
 
     if event_type == "card.action.trigger":
         return await _handle_card_trigger(body.get("event", {}))
+
+    if event_type == "application.bot.menu_v6":
+        background_tasks.add_task(_handle_bot_menu, body.get("event", {}))
+        return {"ok": True}
 
     return {"ok": True}
 
@@ -679,6 +684,82 @@ async def handle_message(event: dict):
         log.exception("handle_message error")
 
 
+async def _handle_bot_menu(event: dict):
+    """处理机器人快捷菜单点击事件（application.bot.menu_v6）。"""
+    try:
+        open_id = event.get("operator", {}).get("operator_id", {}).get("open_id", "")
+        event_key = event.get("event_key", "")
+        if not open_id or not event_key:
+            return
+
+        log.info("bot_menu event_key=%s open_id=%s", event_key, open_id)
+
+        async def send(text: str):
+            await feishu.send_text_to_user(open_id, text, FEISHU_APP_ID, FEISHU_APP_SECRET)
+
+        user = _get_or_init_user(open_id, "")
+        user_role = user.get("role", "unknown")
+        user_status = user.get("status", "unknown")
+
+        # 全员可用
+        if event_key == "show_help":
+            await send(_help_text(user_role))
+            return
+        if event_key == "show_version":
+            await send(f"pm-assist v{_VERSION}")
+            return
+
+        # 需要已注册且 active
+        if user_role in ("unknown", "pending") or user_status != "active":
+            status_msgs = {
+                "pending": "你的注册申请正在等待管理员审批，批准后即可使用全部功能。",
+                "rejected": "你的注册申请已被拒绝，如有疑问请联系管理员。",
+            }
+            await send(status_msgs.get(user_status, "你尚未注册，请发送 /start 开始注册。"))
+            return
+
+        # open_id 作为 chat_id（菜单事件无 chat_id，group binding 不适用，回落到用户绑定项目）
+        chat_id = open_id
+        project = _resolve_project(chat_id, user)
+
+        if event_key == "clear_chat":
+            db.clear_history(chat_id)
+            db.clear_pending(chat_id)
+            db.clear_pending_todos(chat_id)
+            await send("对话历史已清除。")
+            return
+
+        # 查看类：member 也可看（read-only）
+        if event_key in ("view_todos", "view_risks", "view_schedule"):
+            if user_role not in ("pm", "super_admin", "member"):
+                await send("此功能仅限已注册用户使用。")
+                return
+            # super_admin 无项目绑定时查全量；PM/member 按绑定项目过滤
+            query_project = None if user_role == "super_admin" and not user.get("project") else project
+            if event_key == "view_todos":
+                await send(_handle_todo("/todo list", project=query_project))
+            elif event_key == "view_risks":
+                await send(_handle_admin_risk(["list", "open"], project=query_project))
+            elif event_key == "view_schedule":
+                await send(_handle_admin("/admin fact list milestone", open_id, query_project or project, chat_id))
+            return
+
+        # 管理员专用
+        if user_role != "super_admin":
+            await send("无权限：此操作仅限管理员使用。")
+            return
+
+        if event_key == "run_review":
+            await send("开始 AI 洗盘，完成后会发送报告。")
+            report = await _handle_admin_review_run("/admin review run", chat_id=chat_id)
+            await send(report)
+        elif event_key == "admin_users":
+            await send(_handle_admin("/admin user list", open_id, project, chat_id))
+
+    except Exception:
+        log.exception("_handle_bot_menu error event_key=%s", event.get("event_key", ""))
+
+
 def _resolve_project(chat_id: str, user: dict) -> str:
     """确定本次对话的项目：群聊绑定 > 用户绑定 > 第一个活跃项目。"""
     binding = db.get_chat_binding(chat_id)
@@ -850,6 +931,17 @@ async def _handle_message(event: dict):
             reply = await _handle_admin_review_run(text, chat_id=chat_id)
         else:
             reply = _handle_admin(text, sender_open_id, project, chat_id)
+        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return
+
+    # ── PM / 管理员：风险管理 ──
+    if text.startswith("/risk"):
+        if user_role not in ("pm", "super_admin"):
+            await feishu.send_text(chat_id, "此命令仅限项目经理PM和管理员使用。",
+                                   FEISHU_APP_ID, FEISHU_APP_SECRET)
+            return
+        risk_args = text.split(None, 1)[1].split() if len(text.split(None, 1)) > 1 else []
+        reply = _handle_admin_risk(risk_args, project=project)
         await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
@@ -1115,7 +1207,7 @@ def _todo_help() -> str:
     )
 
 
-def _handle_todo(text: str, project: str = "默认") -> str:
+def _handle_todo(text: str, project: str | None = "默认") -> str:
     import re
     rest = text[len("/todo"):].strip()
     if not rest or rest.lower() == "help":
@@ -1344,9 +1436,6 @@ def _handle_admin(text: str, sender_open_id: str = "",
         db.delete_block(bid)
         return f"✓ 已删除 ID:{bid}"
 
-    if cmd == "risk":
-        return _handle_admin_risk(admin_args, project=project)
-
     if cmd == "fact":
         return _handle_admin_fact(admin_args, project=project)
 
@@ -1415,7 +1504,7 @@ def _handle_admin_risk(args: list[str], project: str = "默认") -> str:
         return f"✓ 已设置 #{rid} 负责人为 {owner}"
 
     if sub == "add" and len(args) >= 4:
-        # /admin risk add [type] [priority] [title] | [description]
+        # /risk add [type] [priority] [title] | [description]
         type_ = args[1] if args[1] in ("risk", "issue", "blocker", "dependency") else "risk"
         priority = args[2] if args[2] in ("high", "medium", "low") else "medium"
         rest = " ".join(args[3:])
@@ -1429,11 +1518,11 @@ def _handle_admin_risk(args: list[str], project: str = "默认") -> str:
 
     return (
         "风险命令：\n"
-        "/admin risk list [open|all]\n"
-        "/admin risk close [ID]\n"
-        "/admin risk reopen [ID]\n"
-        "/admin risk owner [ID] [姓名]\n"
-        "/admin risk add [type] [priority] [标题] | [描述]\n"
+        "/risk list [open|all]\n"
+        "/risk close [ID]\n"
+        "/risk reopen [ID]\n"
+        "/risk owner [ID] [姓名]\n"
+        "/risk add [type] [priority] [标题] | [描述]\n"
         "  type: risk|issue|blocker|dependency\n"
         "  priority: high|medium|low"
     )
@@ -1929,6 +2018,10 @@ def _help_text(role: str = "unknown") -> str:
         "  /todo [内容] plan [ID]   挂到里程碑新建待办\n"
         "  /todo done [ID]          标记待办完成\n"
         "  /todo cancel [ID]        取消待办\n"
+        "  /risk list [open|all]    查看风险/问题列表\n"
+        "  /risk close/reopen [ID]  关闭/重开风险\n"
+        "  /risk owner [ID] [姓名]  设置负责人\n"
+        "  /risk add [type] [priority] [标题] | [描述]  新增风险\n"
     )
 
     if role == "member":
@@ -1943,7 +2036,6 @@ def _help_text(role: str = "unknown") -> str:
         "  /admin stats                              系统统计\n"
         "  /admin user list/show/role/project/approve/reject/remove\n"
         "  /admin project list/add/close/open/bind/unbind\n"
-        "  /admin risk list/close/reopen/owner/add\n"
         "  /admin fact list/show/update/archive/delete/add/decompose\n"
         "  /admin review status/mode/run\n"
         "  /admin assumption list/show/add/update/archive/delete\n"
@@ -1958,11 +2050,10 @@ def _admin_help() -> str:
         "/admin stats                              系统统计\n"
         "/admin user list/show/role/approve/reject/remove\n"
         "/admin project list/add/close/open\n"
-        "/admin risk list/close/reopen/owner/add\n"
         "/admin fact list/show/update/archive/delete/add\n"
         "/admin fact decompose [ID]   AI 分解 risk 为待办\n"
         "/admin review status/mode/run  AI 洗盘配置与手动执行\n"
         "/admin assumption list/show/add/update/archive/delete\n"
         "/admin org list/add\n\n"
-        "PM/管理员：/todo list/done/cancel/[内容]  /note [内容]"
+        "PM/管理员：/risk list/close/reopen/owner/add  /todo list/done/cancel/[内容]  /note [内容]"
     )

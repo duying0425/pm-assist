@@ -264,7 +264,7 @@ def build_approval_card(open_id: str, name: str, role: str, project: str) -> dic
                     {"is_short": True, "text": {"tag": "lark_md", "content": f"**申请角色**\n{role_zh}"}},
                     {"is_short": True, "text": {"tag": "lark_md", "content": f"**申请项目**\n{project}"}},
                     {"is_short": True, "text": {"tag": "lark_md",
-                                                "content": f"**open_id**\n`{open_id}`"}},
+                                                "content": f"**open_id**\n{open_id}"}},
                 ],
             },
             {"tag": "hr"},

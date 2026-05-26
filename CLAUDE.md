@@ -19,7 +19,7 @@
 - 公网地址：`https://pm.tmhcorps.cn`（Cloudflare 代理 HTTP→HTTPS）
 - nginx 配置：`/etc/nginx/conf.d/apps.conf`（与 chat.tmhcorps.cn 共用）
 - 飞书 Webhook：`https://pm.tmhcorps.cn/webhook/feishu`
-- .env 位置：`~/pm-assist/.env`（含 FEISHU_APP_ID/SECRET/TOKEN、OPENROUTER_API_KEY、ADMIN_OPEN_IDS、NOTIFY_OPEN_IDS、PRIMARY_ADMIN_OPEN_ID）
+- .env 位置：`~/pm-assist/.env`（含 FEISHU_APP_ID/SECRET/TOKEN、OPENROUTER_API_KEY、ADMIN_OPEN_IDS、NOTIFY_OPEN_IDS）
 
 ## AI 调用规范
 **必须用 OpenRouter 兼容接口，不得使用 anthropic 包。**
@@ -36,9 +36,9 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `0.7.4`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `0.7.6`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
-- 每次部署前修改 `VERSION`，本地 `git tag v0.7.4 && git push --tags`，scp 时一并上传
+- 每次部署前修改 `VERSION`，本地 `git tag v0.7.6 && git push --tags`，scp 时一并上传
 
 ## 代码结构
 ```
@@ -268,7 +268,7 @@ key / value / updated_at
 ### 注册流程
 1. 用户发 `/start` 查看项目列表
 2. 发 `/join [项目名] [pm|member]` 提交申请
-3. 主管理员（`PRIMARY_ADMIN_OPEN_ID`）收到飞书审批卡片
+3. 所有管理员（`ADMIN_OPEN_IDS`）收到飞书审批卡片
 4. 点击「批准」→ 用户状态改为 active + 通知用户；点击「拒绝」→ 通知用户被拒
 
 ### 数据库新增表
@@ -298,7 +298,7 @@ key / value / updated_at
 ## 已实现功能
 1. **飞书 Bot 对话**：@Bot 发消息，结合四层知识上下文 + 对话历史用 AI 回答
 2. **知识库管理**：`/admin list/add/update/enable/disable/delete`（兼容旧接口）
-3. **风险管理**：`/admin risk list/close/reopen/owner/add`
+3. **风险管理**：`/risk list/close/reopen/owner/add`（PM 和管理员均可用）
 4. **统一信息管理**：`/admin fact list/show/update/archive/delete/add`
 5. **预设假设管理**：`/admin assumption list/show/add/update/archive/delete`
 6. **组织结构管理**：`/admin org list/add`
@@ -331,6 +331,9 @@ key / value / updated_at
 33. **项目绑定管理**：管理员可用 `/admin user project [open_id] [项目名|-]` 修改或清除用户项目绑定；用户可用 `/leave` 自助退出当前项目（v0.7.4）
 34. **`/register` 改名为 `/start`**：新用户入口命令更符合 Bot 惯例，语义更准确（v0.7.5）
 35. **Web 后台操作按钮列对齐修复**：知识库/待办/用户/预设各表的编辑归档按钮列正确对齐（v0.7.5）
+36. **飞书机器人快捷菜单支持**：处理 `application.bot.menu_v6` 事件，支持查看待办/风险/里程碑、清除对话、AI 洗盘、用户列表等菜单操作（v0.7.6）
+37. **`/risk` 独立命令**：风险管理从 `/admin risk` 下放至根级 `/risk`，PM 和管理员均可使用；`/admin` 命令严格限管理员；`db.list_risks` 支持 `project=None` 全量查询（v0.7.6）
+38. **移除 `PRIMARY_ADMIN_OPEN_ID`**：审批卡片统一发给所有 `ADMIN_OPEN_IDS`，配置简化（v0.7.6）
 
 ## 命令速查
 
@@ -355,15 +358,19 @@ key / value / updated_at
 /help                    显示使用说明
 ```
 
-### 管理员专用
+### PM / 管理员可用
 ```
 # 风险管理
-/admin risk list [open|all]
-/admin risk close/reopen [ID]
-/admin risk owner [ID] [姓名]
-/admin risk add [type] [priority] [标题] | [描述]
+/risk list [open|all]
+/risk close [ID]
+/risk reopen [ID]
+/risk owner [ID] [姓名]
+/risk add [type] [priority] [标题] | [描述]
   type: risk|issue|blocker|dependency  priority: high|medium|low
+```
 
+### 管理员专用
+```
 # 统一信息管理
 /admin fact list                       列出所有 active 条目
 /admin fact list risk                  按 type 过滤
@@ -403,7 +410,7 @@ key / value / updated_at
 /admin assumption update [ID] [field] [值]
 /admin assumption archive [ID]
 
-命令解析约定：`risk add`、`fact add`、`fact update`、`assumption add`、`assumption update`、`project add/bind` 等长文本参数由各子命令 handler 自行拼接，不受 `/admin` 顶层 `split(None, 4)` 截断影响；带 `|` 时左侧为标题/名称，右侧为正文/描述。没有 `|` 时，add 类命令通常会把同一段文本同时作为标题和正文。
+命令解析约定：`fact add`、`fact update`、`assumption add`、`assumption update`、`project add/bind`、`risk add` 等长文本参数由各子命令 handler 自行拼接，不受顶层 `split(None, 4)` 截断影响；带 `|` 时左侧为标题/名称，右侧为正文/描述。没有 `|` 时，add 类命令通常会把同一段文本同时作为标题和正文。
 
 # 组织结构管理
 /admin org list [type?]
@@ -416,9 +423,8 @@ key / value / updated_at
 ```
 ADMIN_OPEN_IDS=ou_d1ccad1071d7daf767337953ffeb317a,ou_佟海鹏的open_id
 NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
-PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 ```
-- `ADMIN_OPEN_IDS`：有权使用 `/admin` 命令
+- `ADMIN_OPEN_IDS`：有权使用 `/admin` 命令；审批卡片发给所有管理员
 - `NOTIFY_OPEN_IDS`：只收日报，无管理权限
 - APScheduler 早报发送给 `ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS` 全量
 - 手动 `/admin review run` 发送给 `.env ADMIN_OPEN_IDS` + 数据库中 active 的 `super_admin` 和 `pm`
@@ -426,7 +432,8 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - 获取 open_id：让对方发一条消息，从 `logs/app.log` 找 `sender=ou_xxx`
 
 ## 飞书应用配置要点
-- 事件订阅：`im.message.receive_v1` + `card.action.trigger`（两个都必须订阅）
+- 事件订阅：`im.message.receive_v1` + `card.action.trigger` + `application.bot.menu_v6`（三个都必须订阅）
+- 快捷菜单：在飞书开放平台 → 应用能力 → 机器人 → 快捷菜单 中配置，event_key 与代码中 `_handle_bot_menu` 的 if 判断对应
 - 回调地址：`https://pm.tmhcorps.cn/webhook/feishu`
 - 卡片回调响应格式：`{"toast":..., "card":{"type":"raw","data":{...}}}`（缺少此格式会报错200672）
 
@@ -439,7 +446,7 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - Web 后台概览页可切换洗盘模式，但没有单独登录认证，仍按内部工具处理
 
 ## 服务器当前状态
-- v0.7.5 已部署（/register 改名 /start + Web 后台按钮列对齐修复）
+- v0.7.6 已部署（飞书快捷菜单 + /risk 独立命令 + 移除 PRIMARY_ADMIN_OPEN_ID）
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
 - todos/users/projects/system_settings 表由 `init_db()` 自动创建，无需手动迁移
@@ -448,6 +455,7 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - **部署后首次启动**：`init_db()` 自动创建 users/projects 表并种入「雅迪」项目；.env 中的 ADMIN_OPEN_IDS 用户首次发消息时自动注册为 super_admin
 
 ## 待开发
+- [x] 飞书机器人快捷菜单（`application.bot.menu_v6`，v0.7.6）
 - [ ] 佟海鹏 open_id 添加到 .env ADMIN_OPEN_IDS（让他在飞书发一条消息看日志）
 - [ ] systemd 自动重启（当前重启服务器后需手动拉起）
 - [ ] Web 后台登录认证（当前无认证，内部工具暂可接受）
