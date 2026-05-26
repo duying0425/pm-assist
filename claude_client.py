@@ -170,6 +170,7 @@ _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析
 - 从风险候选或状态缺口中提炼下一步行动。
 - 只给人工确认命令，不要加 [AUTO]，例如：
 /todo 联系华阳确认 BSP 验证完成时间 risk 12
+- 如果已有 todo 可完成或取消，必须同时在报告末尾的机器可读区写入 action_candidates。
 
 六、描述质量改写建议
 - 找出描述太口语、缺背景、缺结论、缺下一步的信息。
@@ -191,6 +192,12 @@ _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析
 ===MERGE_CANDIDATES_JSON===
 {{"merge_candidates":[{{"keep_id":12,"merge_ids":[18,21],"reason":"描述同一件事，#12 信息更完整","append_text":"#18/#21 补充的信息：华阳尚未给出明确完成时间，需持续跟进。"}}]}}
 ===END_MERGE_CANDIDATES_JSON===
+
+十、机器可读风险/待办动作建议
+- 必须紧跟合并建议之后；没有建议时 action_candidates 为空数组：
+===ACTION_CANDIDATES_JSON===
+{{"action_candidates":[{{"kind":"risk","id":12,"action":"close","reason":"风险已解决或已被新状态覆盖"}},{{"kind":"fact","id":18,"action":"archive","reason":"信息已过期"}},{{"kind":"todo","id":7,"action":"done","reason":"待办已完成"}},{{"kind":"todo","id":8,"action":"cancel","reason":"待办已不再需要"}}]}}
+===END_ACTION_CANDIDATES_JSON===
 
 命令约束：
 - 只有低风险归档和字段补全可以使用 [AUTO] 前缀。

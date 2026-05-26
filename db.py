@@ -927,6 +927,7 @@ def clear_pending(chat_id: str):
 
 _TODO_PENDING_PREFIX = "todo|"
 _MERGE_PENDING_PREFIX = "merge|"
+_ACTION_PENDING_PREFIX = "action|"
 
 
 def save_pending_todos(chat_id: str, todos: list[dict]):
@@ -959,6 +960,22 @@ def pop_pending_merge(chat_id: str, index: int) -> tuple[dict | None, list[dict]
 
 def clear_pending_merges(chat_id: str):
     clear_pending(_MERGE_PENDING_PREFIX + chat_id)
+
+
+def save_pending_actions(chat_id: str, actions: list[dict]):
+    save_pending(_ACTION_PENDING_PREFIX + chat_id, actions)
+
+
+def get_pending_actions(chat_id: str) -> list[dict]:
+    return get_pending(_ACTION_PENDING_PREFIX + chat_id)
+
+
+def pop_pending_action(chat_id: str, index: int) -> tuple[dict | None, list[dict]]:
+    return pop_pending_item(_ACTION_PENDING_PREFIX + chat_id, index)
+
+
+def clear_pending_actions(chat_id: str):
+    clear_pending(_ACTION_PENDING_PREFIX + chat_id)
 
 
 def save_nightly_review(content: str) -> int:

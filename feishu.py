@@ -646,6 +646,153 @@ def card_merge_skipped_response() -> dict:
     }
 
 
+# ── Risk/Todo 清洗动作确认卡片 ──────────────────────────────
+
+_ACTION_LABELS = {
+    ("risk", "close"): "关闭风险",
+    ("fact", "archive"): "归档信息",
+    ("todo", "done"): "完成待办",
+    ("todo", "cancel"): "取消待办",
+}
+
+
+def build_action_confirm_card(actions: list[dict], chat_id: str,
+                              saved_count: int = 0) -> dict:
+    elements = []
+    for i, item in enumerate(actions[:10]):
+        kind = item.get("kind", "")
+        action = item.get("action", "")
+        item_id = item.get("id", "")
+        title = item.get("title", "")
+        reason = item.get("reason", "")
+        label = _ACTION_LABELS.get((kind, action), f"{kind}.{action}")
+        prefix = "#T" if kind == "todo" else "#"
+
+        elements.append({
+            "tag": "column_set",
+            "flex_mode": "none",
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 5,
+                    "elements": [{
+                        "tag": "div",
+                        "text": {"tag": "lark_md",
+                                 "content": (
+                                     f"**{i + 1}. {label} {prefix}{item_id}** {title}\n"
+                                     f"原因：{reason}"
+                                 )},
+                    }],
+                },
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "elements": [{
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": label[:4]},
+                        "type": "primary",
+                        "value": {
+                            "action": "review_action_one",
+                            "chat_id": chat_id,
+                            "index": i,
+                            "saved_count": saved_count,
+                        },
+                    }],
+                },
+            ],
+        })
+
+    title_text = (f"✅ 已处理 {saved_count} 项，还剩 {len(actions)} 项"
+                  if saved_count > 0
+                  else f"⚙️ 建议处理 {len(actions)} 项风险/待办")
+    elements.extend([
+        {"tag": "hr"},
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "✓ 全部处理"},
+                    "type": "primary",
+                    "value": {"action": "review_action_all", "chat_id": chat_id,
+                              "saved_count": saved_count},
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "✗ 跳过"},
+                    "type": "danger",
+                    "value": {"action": "skip_review_actions", "chat_id": chat_id},
+                },
+            ],
+        },
+    ])
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": title_text},
+            "template": "blue" if saved_count == 0 else "green",
+        },
+        "elements": elements,
+    }
+
+
+async def send_action_confirm_card(chat_id: str, actions: list[dict],
+                                   app_id: str, app_secret: str):
+    token = await get_tenant_token(app_id, app_secret)
+    card = build_action_confirm_card(actions, chat_id)
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{FEISHU_BASE}/im/v1/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"receive_id_type": "chat_id"},
+            json={"receive_id": chat_id, "msg_type": "interactive",
+                  "content": json.dumps(card)},
+        )
+
+
+def card_action_saved_response(count: int) -> dict:
+    return {
+        "toast": {"type": "success", "content": f"已处理 {count} 项"},
+        "card": {
+            "type": "raw",
+            "data": {
+                "config": {"enable_forward": False},
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"✅ 已处理 {count} 项风险/待办。"},
+                }],
+            },
+        },
+    }
+
+
+def card_action_one_saved_response(item: dict, remaining: list[dict],
+                                   chat_id: str, saved_count: int) -> dict:
+    updated = build_action_confirm_card(remaining, chat_id, saved_count)
+    return {
+        "toast": {"type": "success", "content": f"已处理：{item.get('title', '')[:20]}"},
+        "card": {"type": "raw", "data": updated},
+    }
+
+
+def card_action_skipped_response() -> dict:
+    return {
+        "toast": {"type": "info", "content": "已跳过"},
+        "card": {
+            "type": "raw",
+            "data": {
+                "config": {"enable_forward": False},
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": "⏭ 已跳过风险/待办处理建议。"},
+                }],
+            },
+        },
+    }
+
+
 def _split(text: str, limit: int) -> list[str]:
     if len(text) <= limit:
         return [text]

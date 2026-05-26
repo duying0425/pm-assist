@@ -168,14 +168,75 @@ def _extract_merge_candidates(report: str) -> list[dict]:
     return candidates[:10]
 
 
-def _strip_merge_candidates_json(report: str) -> str:
-    start_marker = "===MERGE_CANDIDATES_JSON==="
-    end_marker = "===END_MERGE_CANDIDATES_JSON==="
+def _extract_json_section(report: str, start_marker: str, end_marker: str) -> dict:
     start = report.find(start_marker)
     end = report.find(end_marker)
     if start < 0 or end < 0 or end <= start:
-        return report
-    return (report[:start] + report[end + len(end_marker):]).strip()
+        return {}
+    raw = report[start + len(start_marker):end].strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        log.warning("failed to parse JSON section %s", start_marker)
+        return {}
+
+
+def _extract_action_candidates(report: str) -> list[dict]:
+    payload = _extract_json_section(
+        report,
+        "===ACTION_CANDIDATES_JSON===",
+        "===END_ACTION_CANDIDATES_JSON===",
+    )
+    candidates = []
+    for item in payload.get("action_candidates", []):
+        kind = str(item.get("kind", "")).lower()
+        action = str(item.get("action", "")).lower()
+        try:
+            item_id = int(item.get("id"))
+        except Exception:
+            continue
+        if (kind, action) not in {
+            ("risk", "close"),
+            ("fact", "archive"),
+            ("todo", "done"),
+            ("todo", "cancel"),
+        }:
+            continue
+
+        title = ""
+        if kind in ("risk", "fact"):
+            fact = db.get_fact(item_id)
+            if not fact:
+                continue
+            if kind == "risk" and fact.get("dimension") != "risk":
+                continue
+            title = fact.get("title", "")
+        else:
+            todo = db.get_todo(item_id)
+            if not todo:
+                continue
+            title = todo.get("title", "")
+
+        candidates.append({
+            "kind": kind,
+            "id": item_id,
+            "action": action,
+            "title": title[:80],
+            "reason": str(item.get("reason", ""))[:300],
+        })
+    return candidates[:10]
+
+
+def _strip_merge_candidates_json(report: str) -> str:
+    for start_marker, end_marker in (
+        ("===MERGE_CANDIDATES_JSON===", "===END_MERGE_CANDIDATES_JSON==="),
+        ("===ACTION_CANDIDATES_JSON===", "===END_ACTION_CANDIDATES_JSON==="),
+    ):
+        start = report.find(start_marker)
+        end = report.find(end_marker)
+        if start >= 0 and end > start:
+            report = (report[:start] + report[end + len(end_marker):]).strip()
+    return report
 
 
 async def _build_and_save_review(mode: str | None = None) -> str | None:
@@ -223,6 +284,17 @@ async def _send_merge_candidates_card(chat_id: str, report: str):
     db.save_pending_merges(chat_id, candidates)
     await feishu.send_merge_confirm_card(chat_id, candidates, FEISHU_APP_ID, FEISHU_APP_SECRET)
     log.info("sent %d merge candidates to chat_id=%s", len(candidates), chat_id)
+
+
+async def _send_action_candidates_card(chat_id: str, report: str):
+    if not chat_id:
+        return
+    candidates = _extract_action_candidates(report)
+    if not candidates:
+        return
+    db.save_pending_actions(chat_id, candidates)
+    await feishu.send_action_confirm_card(chat_id, candidates, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    log.info("sent %d action candidates to chat_id=%s", len(candidates), chat_id)
 
 
 async def _run_nightly_review():
@@ -375,6 +447,15 @@ async def _handle_card_callback(body: dict) -> dict:
         db.clear_pending_merges(chat_id)
         return feishu.card_merge_skipped_response()
 
+    # ── 风险/待办处理确认卡片 ──
+    if action == "review_action_one":
+        return _card_review_action_one(value, chat_id)
+    if action == "review_action_all":
+        return _card_review_action_all(value, chat_id)
+    if action == "skip_review_actions":
+        db.clear_pending_actions(chat_id)
+        return feishu.card_action_skipped_response()
+
     db.clear_pending(chat_id)
     return feishu.card_skipped_response()
 
@@ -462,6 +543,47 @@ def _card_merge_all(value: dict, chat_id: str) -> dict:
     return feishu.card_merge_skipped_response()
 
 
+def _apply_review_action(item: dict):
+    kind = item.get("kind")
+    action = item.get("action")
+    item_id = int(item["id"])
+    if kind == "risk" and action == "close":
+        db.update_risk(item_id, status="closed")
+    elif kind == "fact" and action == "archive":
+        db.update_fact(item_id, status="archived")
+    elif kind == "todo" and action == "done":
+        db.update_todo(item_id, status="done")
+    elif kind == "todo" and action == "cancel":
+        db.update_todo(item_id, status="cancelled")
+    else:
+        raise ValueError(f"unsupported review action: {kind}.{action}")
+
+
+def _card_review_action_one(value: dict, chat_id: str) -> dict:
+    index = int(value.get("index", -1))
+    saved_count = int(value.get("saved_count", 0))
+    saved, remaining = db.pop_pending_action(chat_id, index)
+    if saved:
+        _apply_review_action(saved)
+        saved_count += 1
+        if remaining:
+            return feishu.card_action_one_saved_response(saved, remaining, chat_id, saved_count)
+        return feishu.card_action_saved_response(saved_count)
+    return feishu.card_action_skipped_response()
+
+
+def _card_review_action_all(value: dict, chat_id: str) -> dict:
+    prev_saved = int(value.get("saved_count", 0))
+    pending = db.get_pending_actions(chat_id)
+    if pending:
+        for item in pending:
+            _apply_review_action(item)
+        db.clear_pending_actions(chat_id)
+        return feishu.card_action_saved_response(prev_saved + len(pending))
+    db.clear_pending_actions(chat_id)
+    return feishu.card_action_skipped_response()
+
+
 async def _handle_card_trigger(event: dict) -> dict:
     try:
         value = event.get("action", {}).get("value", {})
@@ -515,6 +637,15 @@ async def _handle_card_trigger(event: dict) -> dict:
         if action == "skip_merges":
             db.clear_pending_merges(chat_id)
             return feishu.card_merge_skipped_response()
+
+        # ── 风险/待办处理确认卡片 ──
+        if action == "review_action_one":
+            return _card_review_action_one(value, chat_id)
+        if action == "review_action_all":
+            return _card_review_action_all(value, chat_id)
+        if action == "skip_review_actions":
+            db.clear_pending_actions(chat_id)
+            return feishu.card_action_skipped_response()
 
         # ── 知识库确认卡片 ──
         if action == "save_one":
@@ -1090,8 +1221,15 @@ async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
 
     await _send_review_to_admins_pm(_strip_merge_candidates_json(report))
     await _send_merge_candidates_card(chat_id, report)
+    await _send_action_candidates_card(chat_id, report)
     merge_count = len(_extract_merge_candidates(report))
-    suffix = f" 另发现 {merge_count} 组合并建议，请在卡片中确认。" if merge_count else ""
+    action_count = len(_extract_action_candidates(report))
+    suffix_parts = []
+    if merge_count:
+        suffix_parts.append(f"{merge_count} 组合并建议")
+    if action_count:
+        suffix_parts.append(f"{action_count} 项风险/待办处理建议")
+    suffix = f" 另发现 {'、'.join(suffix_parts)}，请在卡片中确认。" if suffix_parts else ""
     return f"✓ 已完成手动 AI 洗盘（{_review_mode_label(mode)}），报告已发送给管理员和 PM。{suffix}"
 
 
