@@ -134,20 +134,62 @@ _EXTRACT_PROMPT = """你是一个信息提取助手。分析下面这段项目�
 """
 
 
-_REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析以下项目信息库的所有条目，给出清洗建议报告。
+_REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析以下项目信息库的所有 active facts，目标不是简单挑错，而是从杂乱信息中提炼仍然有用的项目数据。
 
-重点检查：
-1. **疑似重复**：内容或标题高度相似的条目，建议其中一条归档
-2. **疑似过期**：最后更新超过30天且看起来已完成或不再相关的条目
-3. **高优先级但无负责人**：高优先级条目缺少 owner 字段
-4. **超期未关闭**：截止日期已过但仍为 active 的条目
-5. **优先级合理性**：结合内容判断优先级是否准确
+核心原则：
+1. facts 不是原始聊天记录，而是项目记忆库；你要判断哪些信息仍有用、哪些应合并、哪些应升级为风险或待办。
+2. 不同信息生命周期不同：人员/组织/客户/流程/知识等基础档案长期稳定，不要因为 30 天未更新就建议归档。
+3. 项目状态、里程碑、依赖、客户反馈需要关注是否久未更新、缺下一步、缺 owner、是否暗含风险。
+4. risk/issue/blocker 需要关注超期、无负责人、长期无更新、是否已有行动项、是否可以关闭。
+5. decision 通常应固化保存，只检查是否缺少决策人、日期、影响范围，不轻易归档。
 
-输出格式要求：
-- 每类问题独立一节，发现几条写几条，无问题可跳过该节
-- 每条建议附上可直接执行的 /admin fact 命令（如 /admin fact archive 3）
-- 命令必须单独一行，不要在命令后追加解释文字，便于系统直接执行
-- 末尾给出整体数据健康评分：优 / 良 / 待改善，并说明理由（一句话）
+请严格按以下结构输出：
+
+一、可归档信息
+- 只列明确重复、已完成且失效、或明显不再相关的信息。
+- 低风险可自动归档的命令必须单独一行，并加 [AUTO] 前缀：
+[AUTO] /admin fact archive 3
+
+二、可合并信息
+- 找出表达同一件事的多条信息，说明建议保留哪条、把哪些内容并入哪条。
+- 合并属于高风险动作，只给建议，不要输出 [AUTO] 命令。
+
+三、当前状态更新建议
+- 找出应被更新为“当前状态”的条目，说明建议补充什么。
+- 可以给人工确认命令，但不要加 [AUTO]，例如：
+/admin fact update 12 body 新的状态描述
+
+四、风险候选
+- 从状态、里程碑、依赖、客户反馈中推导潜在风险。
+- 格式：来源 #ID、风险原因、建议风险标题、建议正文。
+- 只给人工确认命令，不要加 [AUTO]，例如：
+/admin fact add risk 标题 | 正文
+
+五、待办建议
+- 从风险候选或状态缺口中提炼下一步行动。
+- 只给人工确认命令，不要加 [AUTO]，例如：
+/todo 联系华阳确认 BSP 验证完成时间 risk 12
+
+六、描述质量改写建议
+- 找出描述太口语、缺背景、缺结论、缺下一步的信息。
+- 给出“建议改写正文”，但不要加 [AUTO]，不要自动覆盖。
+
+七、低风险字段补全
+- 只针对 owner、priority、due_date、status 这类结构化字段。
+- 如果非常确定，可以给 [AUTO] 命令，命令必须单独一行：
+[AUTO] /admin fact update 8 owner 张三
+[AUTO] /admin fact update 9 priority high
+[AUTO] /admin fact update 10 due_date 2026-06-01
+[AUTO] /admin fact update 11 status resolved
+
+八、数据健康评分
+- 给出整体评分：优 / 良 / 待改善，并用一句话说明原因。
+
+命令约束：
+- 只有低风险归档和字段补全可以使用 [AUTO] 前缀。
+- [AUTO] 命令只允许 `/admin fact archive [ID]` 或 `/admin fact update [ID] owner|priority|due_date|status [值]`。
+- title/body 改写、新增 risk、新增 todo、合并信息都必须人工确认，绝不能加 [AUTO]。
+- 命令必须单独一行，不要在命令后追加解释文字，便于系统识别。
 
 项目信息库（共 {count} 条 active 条目）：
 {facts_text}
@@ -161,7 +203,7 @@ async def nightly_review(facts_text: str) -> str:
     try:
         response = await _client.chat.completions.create(
             model=AI_MODEL,
-            max_tokens=2000,
+            max_tokens=3500,
             messages=[{"role": "user", "content": prompt}],
         )
         return response.choices[0].message.content

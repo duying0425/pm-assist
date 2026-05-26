@@ -232,9 +232,11 @@ key / value / updated_at
 **洗盘边界**：
 - 当前洗盘对象是 `facts` 表，不包含 `todos`、`assumptions`、`org_units`
 - `todos` 不是 fact；todo 可通过 `source_fact_id` 关联 risk/issue/blocker，但不会被当前洗盘直接处理
-- `direct_cleanup` 只执行白名单命令：`/admin fact archive [ID]` 和 `/admin fact update [ID] status|owner|priority|due_date|title|body [值]`
-- 不执行 AI 生成的 delete 或其他非白名单命令；priority/status 会做合法值校验
-- 当前洗盘偏数据治理（重复/过期/缺 owner/超期/优先级），不主动重写低质量正文；正文重写后续应单独做确认式能力
+- 洗盘目标已升级为“项目数据提炼”：从杂乱 facts 中识别有用状态、可归档信息、风险候选、待办建议和描述质量问题
+- 报告结构：可归档信息 / 可合并信息 / 当前状态更新建议 / 风险候选 / 待办建议 / 描述质量改写建议 / 低风险字段补全 / 数据健康评分
+- `direct_cleanup` 只执行带 `[AUTO]` 前缀的低风险白名单命令：`/admin fact archive [ID]` 和 `/admin fact update [ID] status|owner|priority|due_date [值]`
+- 不执行 AI 生成的 delete、新增 risk、新增 todo、合并、title/body 改写或其他非白名单命令；priority/status 会做合法值校验
+- 正文改写、风险候选、待办建议属于高风险语义动作，只在报告里给人工确认建议，不自动保存
 
 ## AI 上下文注入顺序（claude_client.py）
 
@@ -411,7 +413,7 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - `aliyun.tmhcorps.cn` DNS 须设为"仅DNS"（灰云），否则 SSH 被 Cloudflare 拦截
 - 飞书卡片回调响应 body 必须包含 `card.type="raw"` 和 `data` 包装层
 - APScheduler 的定时任务在服务重启后重新注册，若服务在 00:30 后重启，当天洗盘会跳过（次日才补跑）
-- AI 洗盘 `direct_cleanup` 会修改 facts，请先用 `/admin review run report` 观察建议质量；目前不会清洗 todos
+- AI 洗盘 `direct_cleanup` 只执行报告中带 `[AUTO]` 前缀的低风险 facts 命令；请先用 `/admin review run report` 观察建议质量；目前不会直接清洗 todos
 - Web 后台概览页可切换洗盘模式，但没有单独登录认证，仍按内部工具处理
 
 ## 服务器当前状态

@@ -77,13 +77,16 @@ def _normalize_review_mode(value: str) -> str | None:
 
 
 def _apply_review_commands(report: str) -> list[str]:
-    """Execute a conservative allowlist of /admin fact commands from the AI report."""
-    allowed_update = {"status", "owner", "priority", "due_date", "title", "body"}
+    """Execute only explicit low-risk [AUTO] commands from the AI report."""
+    allowed_update = {"status", "owner", "priority", "due_date"}
     results: list[str] = []
     seen: set[str] = set()
     pattern = re.compile(r"/admin\s+fact\s+(archive|update)\s+(\d+)(?:\s+([a-zA-Z_]+)\s+(.+))?")
     for line in report.splitlines():
-        match = pattern.search(line)
+        stripped = line.strip()
+        if not stripped.startswith("[AUTO]"):
+            continue
+        match = pattern.search(stripped)
         if not match:
             continue
         raw_cmd = match.group(0).strip()
