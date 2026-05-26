@@ -846,6 +846,7 @@ def _handle_admin(text: str, sender_open_id: str = "",
                   project: str = "默认", chat_id: str = "") -> str:
     parts = text.split(None, 4)
     cmd = parts[1].lower() if len(parts) > 1 else ""
+    admin_args = text.split()[2:] if len(parts) > 2 else []
 
     if cmd == "list":
         blocks = db.list_blocks()
@@ -897,23 +898,22 @@ def _handle_admin(text: str, sender_open_id: str = "",
         return f"✓ 已删除 ID:{bid}"
 
     if cmd == "risk":
-        return _handle_admin_risk(parts[2:] if len(parts) > 2 else [], project=project)
+        return _handle_admin_risk(admin_args, project=project)
 
     if cmd == "fact":
-        return _handle_admin_fact(parts[2:] if len(parts) > 2 else [], project=project)
+        return _handle_admin_fact(admin_args, project=project)
 
     if cmd == "assumption":
-        return _handle_admin_assumption(parts[2:] if len(parts) > 2 else [])
+        return _handle_admin_assumption(admin_args)
 
     if cmd == "org":
-        return _handle_admin_org(parts[2:] if len(parts) > 2 else [])
+        return _handle_admin_org(admin_args)
 
     if cmd == "user":
-        return _handle_admin_user(parts[2:] if len(parts) > 2 else [])
+        return _handle_admin_user(admin_args)
 
     if cmd == "project":
-        return _handle_admin_project(parts[2:] if len(parts) > 2 else [],
-                                     sender_open_id, chat_id)
+        return _handle_admin_project(admin_args, sender_open_id, chat_id)
 
     if cmd == "stats":
         return _handle_admin_stats()
@@ -1134,18 +1134,23 @@ def _handle_admin_assumption(args: list[str]) -> str:
         # /admin assumption add [scope] [confidence] [标题] | [正文]
         # scope: dept|project|client|global
         # confidence: universal|common|assumed
-        scope      = args[1] if args[1] in ("dept","project","client","global") else "dept"
+        scope_token = args[1]
+        scope_ref = ""
+        if "/" in scope_token:
+            scope_token, scope_ref = scope_token.split("/", 1)
+        scope      = scope_token if scope_token in ("dept","project","client","global") else "dept"
         confidence = args[2] if args[2] in ("universal","common","assumed") else "common"
         rest = " ".join(args[3:])
+        if not rest.strip():
+            return "用法：/admin assumption add [scope] [confidence] [标题] | [正文]\n例如：/admin assumption add dept common 会议纪要规则 | 所有关键决策必须记录 owner 和截止时间"
         if "|" in rest:
             title, body = rest.split("|", 1)
             title, body = title.strip(), body.strip()
         else:
             title, body = rest.strip(), rest.strip()
-        scope_ref = ""
         # 支持 project/雅迪 这种格式指定 scope_ref
-        if "/" in scope:
-            scope, scope_ref = scope.split("/", 1)
+        if not title or not body:
+            return "标题和正文不能为空。格式：/admin assumption add [scope] [confidence] [标题] | [正文]"
         aid = db.add_assumption(title, body, scope=scope, scope_ref=scope_ref, confidence=confidence)
         return f"✓ 已添加预设假设 #{aid} [{scope}·{confidence}] {title}"
 

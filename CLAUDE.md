@@ -356,6 +356,8 @@ event_id（PRIMARY KEY）/ created_at
 /admin assumption update [ID] [field] [值]
 /admin assumption archive [ID]
 
+命令解析约定：`risk add`、`fact add`、`fact update`、`assumption add`、`assumption update`、`project add/bind` 等长文本参数由各子命令 handler 自行拼接，不受 `/admin` 顶层 `split(None, 4)` 截断影响；带 `|` 时左侧为标题/名称，右侧为正文/描述。没有 `|` 时，add 类命令通常会把同一段文本同时作为标题和正文。
+
 # 组织结构管理
 /admin org list [type?]
 /admin org add [type] [名称] [父节点ID?]
