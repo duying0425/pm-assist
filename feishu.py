@@ -667,6 +667,8 @@ def build_action_confirm_card(actions: list[dict], chat_id: str,
         reason = item.get("reason", "")
         label = _ACTION_LABELS.get((kind, action), f"{kind}.{action}")
         prefix = "#T" if kind == "todo" else "#"
+        type_label = item.get("type_label", "")
+        type_tag = f"[{type_label}] " if type_label else ""
 
         elements.append({
             "tag": "column_set",
@@ -680,7 +682,7 @@ def build_action_confirm_card(actions: list[dict], chat_id: str,
                         "tag": "div",
                         "text": {"tag": "lark_md",
                                  "content": (
-                                     f"**{i + 1}. {label} {prefix}{item_id}** {title}\n"
+                                     f"**{i + 1}. {label}** {type_tag}{prefix}{item_id} {title}\n"
                                      f"原因：{reason}"
                                  )},
                     }],

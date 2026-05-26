@@ -203,6 +203,7 @@ def _extract_action_candidates(report: str) -> list[dict]:
             continue
 
         title = ""
+        type_label = ""
         if kind in ("risk", "fact"):
             fact = db.get_fact(item_id)
             if not fact:
@@ -210,11 +211,13 @@ def _extract_action_candidates(report: str) -> list[dict]:
             if kind == "risk" and fact.get("dimension") != "risk":
                 continue
             title = fact.get("title", "")
+            type_label = _TYPE_LABELS.get(fact.get("type", ""), fact.get("type", ""))
         else:
             todo = db.get_todo(item_id)
             if not todo:
                 continue
             title = todo.get("title", "")
+            type_label = "待办"
 
         candidates.append({
             "kind": kind,
@@ -222,6 +225,7 @@ def _extract_action_candidates(report: str) -> list[dict]:
             "action": action,
             "title": title[:80],
             "reason": str(item.get("reason", ""))[:300],
+            "type_label": type_label,
         })
     return candidates[:10]
 
@@ -1511,7 +1515,8 @@ def _handle_admin_fact(args: list[str], project: str = "默认") -> str:
         "/admin fact archive [ID]                       归档\n"
         "/admin fact delete [ID]                        删除\n"
         "/admin fact add [type] [标题] | [正文]         新增\n"
-        "  type: risk|issue|milestone|decision|team|client|knowledge|process|org"
+        "  type: risk|issue|milestone|decision|team|client|knowledge|process|org\n"
+        "/admin fact decompose [ID]                     AI 分解 risk 为待办列表"
     )
 
 
