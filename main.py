@@ -274,7 +274,7 @@ def _review_recipients_admins_pm() -> set[str]:
 async def _send_review_to_admins_pm(report: str):
     recipients = _review_recipients_admins_pm()
     for uid in recipients:
-        await feishu.send_text_to_user(uid, report, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply_to_user(uid, report, FEISHU_APP_ID, FEISHU_APP_SECRET)
     log.info("manual review sent to %d admins/PMs: %s", len(recipients), recipients)
 
 
@@ -315,7 +315,7 @@ async def _morning_review_and_report():
             return
         morning_report = _notify.build_morning_report(review_text)
         for uid in recipients:
-            await feishu.send_text_to_user(uid, morning_report, FEISHU_APP_ID, FEISHU_APP_SECRET)
+            await feishu.send_reply_to_user(uid, morning_report, FEISHU_APP_ID, FEISHU_APP_SECRET)
         log.info("morning report sent to %d recipients: %s", len(recipients), recipients)
     except Exception:
         log.exception("morning review and report error")
@@ -607,7 +607,7 @@ async def _handle_card_trigger(event: dict) -> dict:
                 }
             db.update_user(open_id, role=role, project=project, status="active")
             role_zh = _ROLE_ZH.get(role, role)
-            await feishu.send_text_to_user(
+            await feishu.send_reply_to_user(
                 open_id,
                 f"🎉 你的注册申请已通过！\n角色：{role_zh}\n项目：{project}\n\n"
                 f"现在可以直接 @Bot 与我对话了，发 /help 查看可用命令。",
@@ -630,7 +630,7 @@ async def _handle_card_trigger(event: dict) -> dict:
                     }},
                 }
             db.update_user(open_id, status="rejected")
-            await feishu.send_text_to_user(
+            await feishu.send_reply_to_user(
                 open_id,
                 "很抱歉，你的注册申请已被拒绝。如有疑问请联系管理员。",
                 FEISHU_APP_ID, FEISHU_APP_SECRET,
@@ -714,8 +714,8 @@ async def _handle_bot_menu(event: dict):
 
         log.info("bot_menu event_key=%s open_id=%s", event_key, open_id)
 
-        async def send(text: str):
-            await feishu.send_text_to_user(open_id, text, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        async def send(content):
+            await feishu.send_reply_to_user(open_id, content, FEISHU_APP_ID, FEISHU_APP_SECRET)
 
         user = _get_or_init_user(open_id, "")
         user_role = user.get("role", "unknown")
@@ -752,10 +752,10 @@ async def _handle_bot_menu(event: dict):
         # 查看类菜单：按角色分级访问
         if event_key in ("view_todos", "view_risks", "view_schedule"):
             # super_admin 无项目绑定时查全量；其他角色按绑定项目过滤
-            query_project = None if user_role == "super_admin" and not user.get("project") else project
+            query_project = project if user.get("project") else None
             if event_key == "view_schedule":
-                # member/pm/super_admin 均可查看里程碑
-                await send(_handle_admin("/admin fact list milestone", open_id, query_project or project, chat_id))
+                # member/pm/super_admin 均可查看里程碑；super_admin 无绑定时 query_project=None 查全量
+                await send(_handle_schedule([], project=query_project))
             else:
                 # view_todos / view_risks：仅 pm 和 super_admin
                 if user_role not in ("pm", "super_admin"):
@@ -906,25 +906,25 @@ async def _handle_message(event: dict):
 
     # ── 所有人可用命令 ──
     if text == "/help":
-        await feishu.send_text(chat_id, _help_text(user_role), FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply(chat_id, _help_text(user_role), FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     if text == "/version":
-        await feishu.send_text(chat_id, f"pm-assist v{_VERSION}", FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply(chat_id, f"pm-assist v{_VERSION}", FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     if text == "/start":
-        await feishu.send_text(chat_id, _register_text(), FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply(chat_id, _register_text(), FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     if text.startswith("/join"):
         reply = await _handle_join(text, sender_open_id, user)
-        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     if text == "/leave":
         reply = _handle_leave(sender_open_id, user)
-        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     # ── 未注册/待审批用户：仅允许 /start /join /help /version ──
@@ -935,7 +935,7 @@ async def _handle_message(event: dict):
             msg = "你的注册申请已被拒绝，如有疑问请联系管理员。"
         else:
             msg = "你尚未注册，请发送 /start 开始注册。"
-        await feishu.send_text(chat_id, msg, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply(chat_id, msg, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     # 确定本次对话所属项目
@@ -944,36 +944,43 @@ async def _handle_message(event: dict):
     # ── 管理员专用命令 ──
     if text.startswith("/admin"):
         if user_role != "super_admin":
-            await feishu.send_text(chat_id, "无权限：/admin 命令仅限管理员使用。",
+            await feishu.send_reply(chat_id, "无权限：/admin 命令仅限管理员使用。",
                                    FEISHU_APP_ID, FEISHU_APP_SECRET)
             return
         if text.startswith("/admin fact decompose"):
             reply = await _handle_admin_fact_decompose(text, chat_id=chat_id)
         elif text.startswith("/admin review run"):
-            await feishu.send_text(chat_id, "开始 AI 洗盘，完成后会发送报告。", FEISHU_APP_ID, FEISHU_APP_SECRET)
+            await feishu.send_reply(chat_id, "开始 AI 洗盘，完成后会发送报告。", FEISHU_APP_ID, FEISHU_APP_SECRET)
             reply = await _handle_admin_review_run(text, chat_id=chat_id)
         elif text.startswith("/admin user approve ") or text.startswith("/admin user reject "):
             reply = await _handle_admin_user_approve_reject(text)
         else:
             reply = _handle_admin(text, sender_open_id, project, chat_id)
-        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return
+
+    # ── member / PM / 管理员：里程碑查看 ──
+    if text.startswith("/schedule"):
+        schedule_args = text.split(None, 1)[1].split() if len(text.split(None, 1)) > 1 else []
+        reply = _handle_schedule(schedule_args, project=project)
+        await feishu.send_reply(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     # ── PM / 管理员：风险管理 ──
     if text.startswith("/risk"):
         if user_role not in ("pm", "super_admin"):
-            await feishu.send_text(chat_id, "此命令仅限项目经理PM和管理员使用。",
+            await feishu.send_reply(chat_id, "此命令仅限项目经理PM和管理员使用。",
                                    FEISHU_APP_ID, FEISHU_APP_SECRET)
             return
         risk_args = text.split(None, 1)[1].split() if len(text.split(None, 1)) > 1 else []
         reply = _handle_admin_risk(risk_args, project=project)
-        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     # ── PM / 管理员专用命令 ──
     if text.startswith("/note ") or text.startswith("/todo"):
         if user_role not in ("pm", "super_admin"):
-            await feishu.send_text(chat_id, "此命令仅限项目经理PM和管理员使用。",
+            await feishu.send_reply(chat_id, "此命令仅限项目经理PM和管理员使用。",
                                    FEISHU_APP_ID, FEISHU_APP_SECRET)
             return
         if text.startswith("/note "):
@@ -981,18 +988,18 @@ async def _handle_message(event: dict):
             if note:
                 bid = db.add_fact("knowledge", f"笔记#{db.count_notes() + 1}",
                                   note, source="manual", project=project)
-                await feishu.send_text(chat_id, f"✓ 已记录 (ID:{bid})", FEISHU_APP_ID, FEISHU_APP_SECRET)
+                await feishu.send_reply(chat_id, f"✓ 已记录 (ID:{bid})", FEISHU_APP_ID, FEISHU_APP_SECRET)
             return
         if text.startswith("/todo"):
             reply = _handle_todo(text, project=project)
-            await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+            await feishu.send_reply(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
             return
 
     if text == "/clear":
         db.clear_history(chat_id)
         db.clear_pending(chat_id)
         db.clear_pending_todos(chat_id)
-        await feishu.send_text(chat_id, "对话历史已清除。", FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply(chat_id, "对话历史已清除。", FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     # ── AI 对话（member/pm/super_admin 均可，上下文深度不同）──
@@ -1004,11 +1011,11 @@ async def _handle_message(event: dict):
     context = db.get_full_context(project)
     sender_info_str = _sender_info(user)
 
-    # 先发"思考中"占位消息，拿到 message_id 以便后续原地更新
+    # 先发"思考中"卡片占位，拿到 message_id 以便后续原地更新
     msg_id = ""
     try:
-        msg_id = await feishu.send_text_return_id(
-            chat_id, "⏳ 思考中...", FEISHU_APP_ID, FEISHU_APP_SECRET
+        msg_id = await feishu.send_card_return_id(
+            chat_id, feishu.build_thinking_card(), FEISHU_APP_ID, FEISHU_APP_SECRET
         )
     except Exception:
         log.warning("failed to send thinking indicator for chat_id=%s", chat_id)
@@ -1028,17 +1035,15 @@ async def _handle_message(event: dict):
 
     db.add_message(chat_id, "assistant", reply)
 
-    # 用实际回复更新占位消息；超长时追加发送后续分块
+    # 用实际回复卡片更新占位消息（lark_md 渲染，保留 markdown 格式）
+    reply_card = feishu.build_md_card(reply)
     if msg_id:
-        updated = await feishu.update_message_text(msg_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        updated = await feishu.update_message_card(msg_id, reply_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
         if not updated:
-            log.warning("PATCH message failed, falling back to new message chat_id=%s msg_id=%s", chat_id, msg_id)
-            await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
-        elif len(reply) > 4000:
-            for chunk in feishu._split(reply[4000:], 4000):
-                await feishu.send_text(chat_id, chunk, FEISHU_APP_ID, FEISHU_APP_SECRET)
+            log.warning("PATCH card failed, falling back to new card chat_id=%s msg_id=%s", chat_id, msg_id)
+            await feishu.send_reply(chat_id, reply_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
     else:
-        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        await feishu.send_reply(chat_id, reply_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
 
     # 仅 PM 和管理员触发信息提取卡片 + 待办意图提取
     if user_role in ("pm", "super_admin"):
@@ -1183,38 +1188,6 @@ async def _extract_todos_and_card(chat_id: str, text: str, project: str = "默�
 
 # ── Todo 命令（所有用户）────────────────────────────────────
 
-def _fmt_todo_list(rows) -> str:
-    if not rows:
-        return "暂无待办事项"
-    _PRIO = {"high": "高", "medium": "中", "low": "低"}
-    _ICON = {"open": "[ ]", "done": "[x]", "cancelled": "[~]"}
-    open_count = sum(1 for r in rows if r["status"] == "open")
-    lines = [f"📋 待办（{open_count} 条进行中）\n"]
-    for r in rows:
-        r = dict(r)
-        icon = _ICON.get(r["status"], "[ ]")
-        p = _PRIO.get(r["priority"], "")
-        prio_tag = f" [{p}]" if p and p != "中" else ""
-        line = f"#T{r['id']} {icon}{prio_tag} {r['title']}"
-        details = []
-        if r["owner"]:    details.append(f"owner:{r['owner']}")
-        if r["due_date"]: details.append(f"due:{r['due_date']}")
-        details.append(f"创建:{r['created_at'][:10]}")
-        if r["status"] == "done": details.append(f"完成:{r['updated_at'][:10]}")
-        line += "\n   " + "  ".join(details)
-        src = []
-        if r["source_fact_id"]:
-            fact = db.get_fact(r["source_fact_id"])
-            if fact: src.append(f"← risk#{r['source_fact_id']}《{fact['title'][:20]}》")
-        if r["plan_id"]:
-            plan = db.get_fact(r["plan_id"])
-            if plan: src.append(f"← milestone#{r['plan_id']}《{plan['title'][:20]}》")
-        if src:
-            line += "\n   " + "  ".join(src)
-        lines.append(line)
-    return "\n".join(lines)
-
-
 def _todo_help() -> str:
     return (
         "待办事项命令：\n"
@@ -1260,7 +1233,7 @@ def _handle_todo(text: str, project: str | None = "默认") -> str:
                 rows = db.list_todos(status=None, plan_id=bind_id, project=project)
         else:
             rows = db.list_todos(status="open", project=project)
-        return _fmt_todo_list(rows)
+        return feishu.build_todo_list_card([dict(r) for r in rows])
 
     if sub == "done" and len(parts) >= 2 and parts[1].isdigit():
         tid = int(parts[1])
@@ -1286,28 +1259,13 @@ def _handle_todo(text: str, project: str | None = "默认") -> str:
         if not todo:
             return f"找不到待办 #T{tid}"
         todo = dict(todo)
-        _PRIO = {"high": "高", "medium": "中", "low": "低"}
-        _STATUS = {"open": "进行中", "done": "已完成", "cancelled": "已取消"}
-        lines = [
-            f"#T{todo['id']} {todo['title']}",
-            f"状态：{_STATUS.get(todo['status'], todo['status'])}",
-            f"优先级：{_PRIO.get(todo['priority'], todo['priority'])}",
-            f"负责人：{todo['owner'] or '—'}",
-            f"截止：{todo['due_date'] or '—'}",
-            f"项目：{todo['project'] or '—'}",
-            f"创建：{todo['created_at'][:16]}  更新：{todo['updated_at'][:16]}",
-        ]
-        if todo.get("source_fact_id"):
-            fact = db.get_fact(todo["source_fact_id"])
-            if fact:
-                lines.append(f"关联风险：#{todo['source_fact_id']}《{fact['title'][:30]}》")
-        if todo.get("plan_id"):
-            plan = db.get_fact(todo["plan_id"])
-            if plan:
-                lines.append(f"挂载里程碑：#{todo['plan_id']}《{plan['title'][:30]}》")
-        if todo.get("body"):
-            lines.extend(["---", todo["body"]])
-        return "\n".join(lines)
+        source_fact = db.get_fact(todo["source_fact_id"]) if todo.get("source_fact_id") else None
+        plan_fact = db.get_fact(todo["plan_id"]) if todo.get("plan_id") else None
+        return feishu.build_todo_show_card(
+            todo,
+            dict(source_fact) if source_fact else None,
+            dict(plan_fact) if plan_fact else None,
+        )
 
     if sub == "update" and len(parts) >= 3:
         if not parts[1].isdigit():
@@ -1443,7 +1401,7 @@ async def _handle_admin_user_approve_reject(text: str) -> str:
         db.update_user(open_id, status="active")
         role_zh = _ROLE_ZH.get(role, role)
         try:
-            await feishu.send_text_to_user(
+            await feishu.send_reply_to_user(
                 open_id,
                 f"🎉 你的注册申请已通过！\n角色：{role_zh}\n项目：{project}\n\n"
                 f"现在可以直接 @Bot 与我对话了，发 /help 查看可用命令。",
@@ -1459,7 +1417,7 @@ async def _handle_admin_user_approve_reject(text: str) -> str:
             return f"{name} 的申请已是拒绝状态。"
         db.update_user(open_id, status="rejected")
         try:
-            await feishu.send_text_to_user(
+            await feishu.send_reply_to_user(
                 open_id,
                 "很抱歉，你的注册申请已被拒绝。如有疑问请联系管理员。",
                 FEISHU_APP_ID, FEISHU_APP_SECRET,
@@ -1584,6 +1542,35 @@ def _handle_admin(text: str, sender_open_id: str = "",
     return _admin_help()
 
 
+def _handle_schedule(args: list[str], project: str | None = "默认") -> str | dict:
+    sub = args[0].lower() if args else "list"
+
+    if sub == "list":
+        filter_all = len(args) > 1 and args[1].lower() == "all"
+        rows = db.list_facts(type_="milestone",
+                             status=None if filter_all else "active",
+                             project=project)
+        return feishu.build_milestone_list_card([dict(r) for r in rows])
+
+    if sub == "show" and len(args) >= 2:
+        try:
+            fid = int(args[1])
+        except ValueError:
+            return "ID 必须是数字"
+        fact = db.get_fact(fid)
+        if not fact or fact.get("type") != "milestone":
+            return f"找不到里程碑 #{fid}"
+        open_todos = db.list_todos(status="open", plan_id=fid)
+        return feishu.build_milestone_show_card(dict(fact), [dict(t) for t in open_todos])
+
+    return (
+        "里程碑命令：\n"
+        "/schedule list           查看进行中的里程碑\n"
+        "/schedule list all       查看全部里程碑\n"
+        "/schedule show [ID]      查看里程碑详情（含关联待办）"
+    )
+
+
 def _handle_admin_risk(args: list[str], project: str = "默认") -> str:
     sub = args[0].lower() if args else ""
 
@@ -1591,16 +1578,7 @@ def _handle_admin_risk(args: list[str], project: str = "默认") -> str:
         filter_status = args[1] if len(args) > 1 else "open"
         rows = db.list_risks(status=None if filter_status == "all" else filter_status,
                              project=project)
-        if not rows:
-            return f"无{filter_status}状态的风险/问题"
-        lines = [
-            f"#{r['id']} [{_TYPE_LABELS.get(r['type'], r['type'])}"
-            f"·{_PRIO_LABELS.get(r['priority'], r['priority'])}"
-            f"·{_STATUS_LABELS.get(r['status'], r['status'])}]"
-            f" {r['title']}" + (f"（{r['owner']}）" if r['owner'] else "")
-            for r in rows
-        ]
-        return "\n".join(lines)
+        return feishu.build_risk_list_card([dict(r) for r in rows], filter_status)
 
     if sub == "show" and len(args) >= 2:
         try:
@@ -1610,25 +1588,8 @@ def _handle_admin_risk(args: list[str], project: str = "默认") -> str:
         fact = db.get_fact(rid)
         if not fact or fact.get("dimension") != "risk":
             return f"找不到风险 #{rid}"
-        type_label = _TYPE_LABELS.get(fact["type"], fact["type"])
-        prio_label = _PRIO_LABELS.get(fact.get("priority", ""), fact.get("priority", "") or "—")
-        status_label = _STATUS_LABELS.get(fact["status"], fact["status"])
-        lines = [
-            f"#{fact['id']} [{type_label}·{prio_label}·{status_label}] {fact['title']}",
-            f"负责人：{fact['owner'] or '—'}",
-            f"截止：{fact['due_date'] or '—'}",
-            f"记录：{fact['created_at'][:16]}  更新：{fact['updated_at'][:16]}",
-            "---",
-            fact["body"],
-        ]
         open_todos = db.list_todos(status="open", source_fact_id=rid)
-        if open_todos:
-            lines.append(f"\n关联待办（{len(open_todos)} 条进行中）：")
-            for t in open_todos:
-                prio_tag = {"high": "[高]", "low": "[低]"}.get(t["priority"], "")
-                lines.append(f"  #T{t['id']}{prio_tag} {t['title']}" +
-                             (f"（{t['owner']}）" if t["owner"] else ""))
-        return "\n".join(lines)
+        return feishu.build_risk_show_card(dict(fact), [dict(t) for t in open_todos])
 
     if sub == "close" and len(args) >= 2:
         try:

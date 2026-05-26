@@ -1,29 +1,12 @@
 from __future__ import annotations
 
 import json
-import re as _re
 import time
 import httpx
 
 _token_cache: dict = {"value": None, "expires_at": 0}
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
-
-
-def _strip_md(text: str) -> str:
-    """Remove markdown syntax that Feishu plain-text messages don't render."""
-    # Code blocks first (avoid inner-block conflicts)
-    text = _re.sub(r'```[\w]*\n?(.*?)```', r'\1', text, flags=_re.DOTALL)
-    # Headers: ## Title → Title
-    text = _re.sub(r'^#{1,6}\s+', '', text, flags=_re.MULTILINE)
-    # Bold: **text** or __text__
-    text = _re.sub(r'\*\*([^*\n]+)\*\*', r'\1', text)
-    text = _re.sub(r'__([^_\n]+)__', r'\1', text)
-    # Italic: *text* or _text_ (guard against list bullets and underscores in identifiers)
-    text = _re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'\1', text)
-    # Inline code: `code`
-    text = _re.sub(r'`([^`\n]+)`', r'\1', text)
-    return text
 
 _TYPE_LABELS = {
     "risk": "风险",
@@ -55,7 +38,6 @@ async def get_tenant_token(app_id: str, app_secret: str) -> str:
 
 
 async def send_text_to_user(open_id: str, text: str, app_id: str, app_secret: str):
-    text = _strip_md(text)
     token = await get_tenant_token(app_id, app_secret)
     async with httpx.AsyncClient() as client:
         for chunk in _split(text, 4000):
@@ -69,7 +51,6 @@ async def send_text_to_user(open_id: str, text: str, app_id: str, app_secret: st
 
 
 async def send_text(chat_id: str, text: str, app_id: str, app_secret: str):
-    text = _strip_md(text)
     token = await get_tenant_token(app_id, app_secret)
     async with httpx.AsyncClient() as client:
         for chunk in _split(text, 4000):
@@ -351,13 +332,12 @@ async def update_message_text(message_id: str, text: str, app_id: str, app_secre
     """Update an existing text message in-place (Feishu PATCH body API). Returns True on success."""
     if not message_id:
         return False
-    text = _strip_md(text[:4000])
     token = await get_tenant_token(app_id, app_secret)
     async with httpx.AsyncClient() as client:
         resp = await client.patch(
             f"{FEISHU_BASE}/im/v1/messages/{message_id}/body",
             headers={"Authorization": f"Bearer {token}"},
-            json={"content": json.dumps({"text": text})},
+            json={"content": json.dumps({"text": text[:4000]})},
         )
         return resp.status_code == 200
 
@@ -818,3 +798,347 @@ def _split(text: str, limit: int) -> list[str]:
         parts.append(text[:limit])
         text = text[limit:]
     return parts
+
+
+# ── 通用 lark_md 卡片 ──────────────────────────────────────────
+
+def build_md_card(text: str, title: str | None = None, color: str = "blue") -> dict:
+    """把 markdown 文本包成飞书 interactive 卡片（lark_md 渲染）。"""
+    elements = [{"tag": "div", "text": {"tag": "lark_md", "content": text}}]
+    card: dict = {"config": {"wide_screen_mode": True, "enable_forward": True}, "elements": elements}
+    if title:
+        card["header"] = {"title": {"tag": "plain_text", "content": title}, "template": color}
+    return card
+
+
+def build_thinking_card() -> dict:
+    return build_md_card("⏳ 思考中...")
+
+
+# ── 统一发送入口 ──────────────────────────────────────────────
+
+async def send_reply(chat_id: str, content: str | dict, app_id: str, app_secret: str):
+    """统一回复：dict → interactive 卡片；短字符串 → text；长字符串/多行 → lark_md 卡片。"""
+    token = await get_tenant_token(app_id, app_secret)
+    if isinstance(content, dict):
+        msg_type, body = "interactive", json.dumps(content)
+    elif len(content) < 60 and "\n" not in content:
+        msg_type, body = "text", json.dumps({"text": content})
+    else:
+        msg_type, body = "interactive", json.dumps(build_md_card(content))
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{FEISHU_BASE}/im/v1/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"receive_id_type": "chat_id"},
+            json={"receive_id": chat_id, "msg_type": msg_type, "content": body},
+        )
+
+
+async def send_reply_to_user(open_id: str, content: str | dict, app_id: str, app_secret: str):
+    """send_reply 的 DM 版（open_id）。"""
+    token = await get_tenant_token(app_id, app_secret)
+    if isinstance(content, dict):
+        msg_type, body = "interactive", json.dumps(content)
+    elif len(content) < 60 and "\n" not in content:
+        msg_type, body = "text", json.dumps({"text": content})
+    else:
+        msg_type, body = "interactive", json.dumps(build_md_card(content))
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{FEISHU_BASE}/im/v1/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"receive_id_type": "open_id"},
+            json={"receive_id": open_id, "msg_type": msg_type, "content": body},
+        )
+
+
+async def send_card_return_id(chat_id: str, card: dict, app_id: str, app_secret: str) -> str:
+    """发 interactive 卡片并返回 message_id（供后续 PATCH 更新）。"""
+    token = await get_tenant_token(app_id, app_secret)
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{FEISHU_BASE}/im/v1/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"receive_id_type": "chat_id"},
+            json={"receive_id": chat_id, "msg_type": "interactive",
+                  "content": json.dumps(card)},
+        )
+        return resp.json().get("data", {}).get("message_id", "")
+
+
+async def update_message_card(message_id: str, card: dict, app_id: str, app_secret: str) -> bool:
+    """原地 PATCH 更新 interactive 卡片消息。"""
+    if not message_id:
+        return False
+    token = await get_tenant_token(app_id, app_secret)
+    async with httpx.AsyncClient() as client:
+        resp = await client.patch(
+            f"{FEISHU_BASE}/im/v1/messages/{message_id}/body",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"content": json.dumps(card)},
+        )
+        return resp.status_code == 200
+
+
+# ── 结构化查询卡片 builder ────────────────────────────────────
+
+_PRIO_ICON = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+_TYPE_TAG = {
+    "risk": "风险", "issue": "问题", "blocker": "阻塞", "dependency": "依赖",
+    "milestone": "里程碑", "decision": "决策", "knowledge": "知识",
+}
+_PRIO_ZH2 = {"high": "高", "medium": "中", "low": "低"}
+_STATUS_ZH = {"active": "open", "resolved": "resolved", "archived": "archived",
+               "open": "进行中", "done": "已完成", "cancelled": "已取消"}
+
+
+def build_risk_list_card(rows: list, status_filter: str = "open") -> dict:
+    """/risk list 结构化卡片。"""
+    if not rows:
+        return build_md_card(f"暂无{'open' if status_filter == 'open' else ''}风险/问题")
+
+    elements = []
+    for r in rows:
+        icon = _PRIO_ICON.get(r.get("priority", ""), "")
+        type_label = _TYPE_TAG.get(r["type"], r["type"])
+        prio_label = _PRIO_ZH2.get(r.get("priority", ""), "")
+        owner_part = f"  负责人：{r['owner']}" if r.get("owner") else ""
+        due_part = f"  截止：{r['due_date']}" if r.get("due_date") else ""
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"**#{r['id']}  {r['title']}**\n"
+                    f"{icon} [{type_label}·{prio_label}]{owner_part}{due_part}"
+                ),
+            },
+        })
+        elements.append({"tag": "hr"})
+
+    if elements and elements[-1]["tag"] == "hr":
+        elements.pop()
+
+    label = "全部" if status_filter == "all" else "进行中"
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": f"⚠️ 风险列表（{label} · {len(rows)} 条）"},
+            "template": "red",
+        },
+        "elements": elements,
+    }
+
+
+def build_risk_show_card(fact: dict, open_todos: list) -> dict:
+    """/risk show 详情卡片。"""
+    icon = _PRIO_ICON.get(fact.get("priority", ""), "")
+    type_label = _TYPE_TAG.get(fact["type"], fact["type"])
+    prio_label = _PRIO_ZH2.get(fact.get("priority", ""), "—")
+
+    meta_lines = [
+        f"**类型**  {type_label}　　**优先级**  {icon} {prio_label}",
+        f"**负责人**  {fact.get('owner') or '—'}　　**截止**  {fact.get('due_date') or '—'}",
+        f"**记录**  {fact['created_at'][:10]}　　**更新**  {fact['updated_at'][:10]}",
+    ]
+    elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(meta_lines)}},
+        {"tag": "hr"},
+        {"tag": "div", "text": {"tag": "lark_md", "content": fact.get("body") or "（无正文）"}},
+    ]
+
+    if open_todos:
+        todo_lines = [f"**关联待办（{len(open_todos)} 条进行中）**"]
+        for t in open_todos:
+            p = _PRIO_ICON.get(t.get("priority", ""), "")
+            owner_s = f"（{t['owner']}）" if t.get("owner") else ""
+            todo_lines.append(f"- {p} #T{t['id']} {t['title']}{owner_s}")
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md",
+                                                 "content": "\n".join(todo_lines)}})
+
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text",
+                      "content": f"#{fact['id']} {fact['title']}"},
+            "template": "red",
+        },
+        "elements": elements,
+    }
+
+
+def build_todo_list_card(rows: list) -> dict:
+    """/todo list 结构化卡片。"""
+    if not rows:
+        return build_md_card("暂无待办事项")
+
+    _STATUS_ICON = {"open": "☐", "done": "☑", "cancelled": "☒"}
+    open_count = sum(1 for r in rows if r["status"] == "open")
+    elements = []
+
+    for r in rows:
+        icon = _STATUS_ICON.get(r["status"], "☐")
+        prio_icon = _PRIO_ICON.get(r.get("priority", ""), "")
+        meta = []
+        if r.get("owner"):
+            meta.append(f"负责人：{r['owner']}")
+        if r.get("due_date"):
+            meta.append(f"截止：{r['due_date']}")
+        meta.append(f"创建：{r['created_at'][:10]}")
+        if r["status"] == "done":
+            meta.append(f"完成：{r['updated_at'][:10]}")
+        meta_str = "　".join(meta)
+
+        src_parts = []
+        if r.get("source_fact_id"):
+            src_parts.append(f"← risk#{r['source_fact_id']}")
+        if r.get("plan_id"):
+            src_parts.append(f"← milestone#{r['plan_id']}")
+        src_str = ("  " + "  ".join(src_parts)) if src_parts else ""
+
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"{icon} {prio_icon} **#T{r['id']}  {r['title']}**\n"
+                    f"{meta_str}{src_str}"
+                ),
+            },
+        })
+        elements.append({"tag": "hr"})
+
+    if elements and elements[-1]["tag"] == "hr":
+        elements.pop()
+
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text",
+                      "content": f"📋 待办列表（进行中 {open_count} / 共 {len(rows)} 条）"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
+def build_todo_show_card(todo: dict, source_fact: dict | None, plan_fact: dict | None) -> dict:
+    """/todo show 详情卡片。"""
+    _STATUS_ZH_TODO = {"open": "进行中", "done": "已完成", "cancelled": "已取消"}
+    status_label = _STATUS_ZH_TODO.get(todo["status"], todo["status"])
+    prio_icon = _PRIO_ICON.get(todo.get("priority", ""), "")
+    prio_label = _PRIO_ZH2.get(todo.get("priority", ""), "—")
+
+    meta_lines = [
+        f"**状态**  {status_label}　　**优先级**  {prio_icon} {prio_label}",
+        f"**负责人**  {todo.get('owner') or '—'}　　**截止**  {todo.get('due_date') or '—'}",
+        f"**创建**  {todo['created_at'][:16]}　　**更新**  {todo['updated_at'][:16]}",
+    ]
+    if source_fact:
+        meta_lines.append(f"**关联风险**  #{todo['source_fact_id']}《{source_fact['title'][:30]}》")
+    if plan_fact:
+        meta_lines.append(f"**挂载里程碑**  #{todo['plan_id']}《{plan_fact['title'][:30]}》")
+
+    elements = [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(meta_lines)}}]
+    if todo.get("body"):
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": todo["body"]}})
+
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": f"#T{todo['id']} {todo['title']}"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
+def build_milestone_list_card(rows: list) -> dict:
+    """/schedule list 结构化卡片。"""
+    import datetime
+    if not rows:
+        return build_md_card("暂无里程碑")
+
+    today = datetime.date.today().isoformat()
+    elements = []
+    for r in rows:
+        due = r.get("due_date") or ""
+        status = r.get("status", "active")
+        status_icon = "✅" if status == "resolved" else "🔄"
+        if due:
+            overdue = status == "active" and due < today
+            due_part = f"  ⚠️ 已逾期 {due}" if overdue else f"  📅 {due}"
+        else:
+            due_part = ""
+        owner_part = f"  负责人：{r['owner']}" if r.get("owner") else ""
+
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"{status_icon} **#{r['id']}  {r['title']}**\n"
+                    f"{due_part}{owner_part}".strip()
+                ),
+            },
+        })
+        elements.append({"tag": "hr"})
+
+    if elements and elements[-1]["tag"] == "hr":
+        elements.pop()
+
+    active_count = sum(1 for r in rows if r.get("status") == "active")
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text",
+                      "content": f"📅 里程碑（进行中 {active_count} / 共 {len(rows)} 个）"},
+            "template": "green",
+        },
+        "elements": elements,
+    }
+
+
+def build_milestone_show_card(fact: dict, open_todos: list) -> dict:
+    """/schedule show 详情卡片。"""
+    import datetime
+    today = datetime.date.today().isoformat()
+    due = fact.get("due_date") or ""
+    status = fact.get("status", "active")
+    status_label = {"active": "进行中", "resolved": "已完成", "archived": "已归档"}.get(status, status)
+    overdue = status == "active" and due and due < today
+
+    meta_lines = [
+        f"**状态**  {status_label}　　**截止**  {'⚠️ ' if overdue else ''}{due or '—'}",
+        f"**负责人**  {fact.get('owner') or '—'}",
+        f"**记录**  {fact['created_at'][:10]}　　**更新**  {fact['updated_at'][:10]}",
+    ]
+    elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(meta_lines)}},
+    ]
+    if fact.get("body"):
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": fact["body"]}})
+
+    if open_todos:
+        todo_lines = [f"**关联待办（{len(open_todos)} 条进行中）**"]
+        for t in open_todos:
+            p = _PRIO_ICON.get(t.get("priority", ""), "")
+            owner_s = f"（{t['owner']}）" if t.get("owner") else ""
+            todo_lines.append(f"- {p} #T{t['id']} {t['title']}{owner_s}")
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "div", "text": {"tag": "lark_md",
+                                                 "content": "\n".join(todo_lines)}})
+
+    header_color = "yellow" if overdue else "green"
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": f"📅 #{fact['id']} {fact['title']}"},
+            "template": header_color,
+        },
+        "elements": elements,
+    }

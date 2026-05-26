@@ -36,7 +36,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `0.7.7`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `0.7.8`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
 - 每次部署前修改 `VERSION`，本地 `git tag vX.Y.Z && git push --tags`，scp 时一并上传
 
@@ -45,7 +45,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 pm-assist/
 ├── main.py          # FastAPI 主入口，Webhook 处理，管理员命令，卡片回调，/todo 命令
 ├── claude_client.py # AI 对话(chat) + 信息提取(extract_facts) + 洗盘(nightly_review) + 分解(decompose_risk)
-├── feishu.py        # 飞书 API：发文本、发交互卡片、卡片响应格式
+├── feishu.py        # 飞书 API：send_reply/send_reply_to_user（统一出口）、lark_md 卡片 builder、交互卡片、卡片响应格式
 ├── db.py            # SQLite CRUD：四层数据（assumptions/org_units/facts/todos）
 ├── web_admin.py     # Web 管理后台 REST API（FastAPI Router，挂载于 /admin）
 ├── config.py        # 环境变量加载（从 .env 读取）
@@ -362,6 +362,9 @@ key / value / updated_at
 42. **member 权限收敛**：member 角色仅支持 @Bot 查询里程碑和组织信息 + 菜单里程碑查看；/risk、/todo、待办/风险菜单均不开放（v0.7.7）
 43. **pending_notes TTL 延长至 30 分钟**：合并建议/清洗建议卡片有充裕的确认窗口（v0.7.7）
 44. **帮助文本/命令帮助完整化**：按角色分区展示可用命令，`_admin_help()` 补齐全部子命令（v0.7.7）
+45. **飞书消息统一卡片化**：删除 `_strip_md()`，所有回复走 `send_reply()`/`send_reply_to_user()` 统一出口；AI 回复改为 lark_md 卡片保留 markdown 格式；`/risk list/show`、`/todo list/show` 改为结构化卡片（带颜色 header、优先级图标）（v0.7.8）
+46. **`/schedule` 里程碑命令**：独立命令 `/schedule list [all]`、`/schedule show [ID]`，member/PM/管理员均可用；快捷菜单"查看里程碑"同步换卡片；逾期自动标注 ⚠️（v0.7.8）
+47. **快捷菜单项目查询逻辑统一**：有项目绑定查指定项目，无绑定查全量（对所有角色一致）；修复 PM 无绑定时按钮显示空数据的问题（v0.7.8）
 
 ## 命令速查
 
@@ -378,6 +381,11 @@ key / value / updated_at
 @Bot [消息]    AI 对话（深度按角色不同，见权限分级表）
 /clear         清除当前会话历史
 /leave         退出当前项目绑定（角色降为 member，账号保留）
+
+# 里程碑查看（member/pm/super_admin 均可）
+/schedule list           查看进行中的里程碑（卡片）
+/schedule list all       查看全部里程碑
+/schedule show [ID]      查看里程碑详情（含关联待办，卡片）
 ```
 
 ### PM / 管理员可用
@@ -515,6 +523,8 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 ## 服务器当前状态
 - v0.7.6 已部署（飞书快捷菜单 + /risk 独立命令 + 移除 PRIMARY_ADMIN_OPEN_ID）
 - v0.7.7 已部署（/risk show + /todo show/update + approve/reject 通知幂等 + member 权限收敛 + TTL 延长至30分钟 + 帮助文本完整化）
+- v0.7.8 已部署（飞书消息全卡片化 + /schedule 里程碑命令 + 删除 _strip_md）
+- **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
 - todos/users/projects/system_settings 表由 `init_db()` 自动创建，无需手动迁移
@@ -524,6 +534,8 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 
 ## 待开发
 - [x] 飞书机器人快捷菜单（`application.bot.menu_v6`，v0.7.6）
+- [x] 飞书消息全卡片化：send_reply 统一出口，AI 回复 lark_md 卡片，/risk /todo /schedule 结构化卡片（v0.7.8）
+- [x] /schedule 里程碑命令（member/pm/super_admin 均可，v0.7.8）
 - [ ] 佟海鹏 open_id 添加到 .env ADMIN_OPEN_IDS（让他在飞书发一条消息看日志）
 - [ ] systemd 自动重启（当前重启服务器后需手动拉起）
 - [ ] Web 后台登录认证（当前无认证，内部工具暂可接受）
