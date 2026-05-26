@@ -907,6 +907,25 @@ def clear_pending(chat_id: str):
         conn.execute("DELETE FROM pending_notes WHERE chat_id=?", (chat_id,))
 
 
+_TODO_PENDING_PREFIX = "todo|"
+
+
+def save_pending_todos(chat_id: str, todos: list[dict]):
+    save_pending(_TODO_PENDING_PREFIX + chat_id, todos)
+
+
+def get_pending_todos(chat_id: str) -> list[dict]:
+    return get_pending(_TODO_PENDING_PREFIX + chat_id)
+
+
+def pop_pending_todo(chat_id: str, index: int) -> tuple[dict | None, list[dict]]:
+    return pop_pending_item(_TODO_PENDING_PREFIX + chat_id, index)
+
+
+def clear_pending_todos(chat_id: str):
+    clear_pending(_TODO_PENDING_PREFIX + chat_id)
+
+
 def save_nightly_review(content: str) -> int:
     today = datetime.now().strftime("%Y-%m-%d")
     with get_conn() as conn:

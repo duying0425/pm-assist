@@ -20,6 +20,7 @@ _ROLE = """你是东软睿驰自动驾驶团队的内部PM助手，专门帮助P
 - 帮助新人PM避免内耗和常见失误
 
 回答风格：简洁实用，直接给可操作建议；多步骤时给清单；判断该找谁时明确说人/团队名称。
+回答格式：使用纯文本，不要使用Markdown符号（如##标题、**加粗**、*斜体*、`代码`等），列表用数字序号或短横线加空格即可。
 
 重要约束：
 - 当用户提供事实类信息（人员分工、里程碑节点、风险、决策等），不要说"已记录"、"已保存"、"我会记住"等暗示已持久化的话，系统会自动提示用户确认是否保存到知识库
@@ -222,3 +223,46 @@ async def decompose_risk(fact: dict) -> list[dict]:
         return result.get("todos", [])
     except Exception:
         return []
+
+
+_TODO_INTENT_PROMPT_TPL = """分析以下用户消息，判断是否有明确的"创建待办事项"意图。
+
+只在用户明确要求建立/创建/新增待办、任务、提醒时提取，询问或讨论性质的消息不要提取。
+
+提取字段：
+- title: 待办标题（动词开头，简洁）
+- due_date: 截止日期（YYYY-MM-DD格式），没有则留空字符串
+- priority: high/medium/low，默认medium
+- owner: 负责人姓名，没明确提到则留空
+
+今天是 {today}，遇到"下周X"、"明天"、"本周五"等相对日期请换算为绝对日期。
+
+返回格式（仅JSON，不要其他内容）：
+无意图：{{"has_todos": false}}
+有意图：{{"has_todos": true, "todos": [{{"title": "...", "due_date": "", "priority": "medium", "owner": ""}}]}}
+
+用户消息：
+"""
+
+
+async def extract_todo_intent(text: str) -> list[dict]:
+    """从用户消息中提取明确的待办创建意图，无意图则返回空列表。"""
+    import json
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    prompt = _TODO_INTENT_PROMPT_TPL.format(today=today) + text
+    try:
+        response = await _client.chat.completions.create(
+            model=AI_MODEL,
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        result = json.loads(raw)
+        if result.get("has_todos"):
+            return result.get("todos", [])
+    except Exception:
+        pass
+    return []

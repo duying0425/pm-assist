@@ -1,10 +1,27 @@
 import json
+import re as _re
 import time
 import httpx
 
 _token_cache: dict = {"value": None, "expires_at": 0}
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
+
+
+def _strip_md(text: str) -> str:
+    """Remove markdown syntax that Feishu plain-text messages don't render."""
+    # Code blocks first (avoid inner-block conflicts)
+    text = _re.sub(r'```[\w]*\n?(.*?)```', r'\1', text, flags=_re.DOTALL)
+    # Headers: ## Title → Title
+    text = _re.sub(r'^#{1,6}\s+', '', text, flags=_re.MULTILINE)
+    # Bold: **text** or __text__
+    text = _re.sub(r'\*\*([^*\n]+)\*\*', r'\1', text)
+    text = _re.sub(r'__([^_\n]+)__', r'\1', text)
+    # Italic: *text* or _text_ (guard against list bullets and underscores in identifiers)
+    text = _re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'\1', text)
+    # Inline code: `code`
+    text = _re.sub(r'`([^`\n]+)`', r'\1', text)
+    return text
 
 _TYPE_LABELS = {
     "risk": "风险",
@@ -36,6 +53,7 @@ async def get_tenant_token(app_id: str, app_secret: str) -> str:
 
 
 async def send_text_to_user(open_id: str, text: str, app_id: str, app_secret: str):
+    text = _strip_md(text)
     token = await get_tenant_token(app_id, app_secret)
     async with httpx.AsyncClient() as client:
         for chunk in _split(text, 4000):
@@ -49,6 +67,7 @@ async def send_text_to_user(open_id: str, text: str, app_id: str, app_secret: st
 
 
 async def send_text(chat_id: str, text: str, app_id: str, app_secret: str):
+    text = _strip_md(text)
     token = await get_tenant_token(app_id, app_secret)
     async with httpx.AsyncClient() as client:
         for chunk in _split(text, 4000):
@@ -306,6 +325,178 @@ def card_rejected_response(name: str) -> dict:
                 "elements": [{
                     "tag": "div",
                     "text": {"tag": "lark_md", "content": f"❌ 已拒绝 **{name}** 的申请"},
+                }],
+            },
+        },
+    }
+
+
+async def send_text_return_id(chat_id: str, text: str, app_id: str, app_secret: str) -> str:
+    """Send a text message and return its message_id (empty string on failure)."""
+    token = await get_tenant_token(app_id, app_secret)
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{FEISHU_BASE}/im/v1/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"receive_id_type": "chat_id"},
+            json={"receive_id": chat_id, "msg_type": "text",
+                  "content": json.dumps({"text": text})},
+        )
+        return resp.json().get("data", {}).get("message_id", "")
+
+
+async def update_message_text(message_id: str, text: str, app_id: str, app_secret: str) -> bool:
+    """Update an existing text message in-place (Feishu PATCH body API). Returns True on success."""
+    if not message_id:
+        return False
+    text = _strip_md(text[:4000])
+    token = await get_tenant_token(app_id, app_secret)
+    async with httpx.AsyncClient() as client:
+        resp = await client.patch(
+            f"{FEISHU_BASE}/im/v1/messages/{message_id}/body",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"content": json.dumps({"text": text})},
+        )
+        return resp.status_code == 200
+
+
+# ── Todo 确认卡片 ──────────────────────────────────────────
+
+_PRIO_ZH = {"high": "高", "medium": "中", "low": "低"}
+
+
+def build_todo_confirm_card(todos: list[dict], chat_id: str, saved_count: int = 0) -> dict:
+    elements = []
+    for i, todo in enumerate(todos[:10]):
+        title = todo.get("title", "")
+        due = todo.get("due_date", "")
+        priority = todo.get("priority", "medium")
+        owner = todo.get("owner", "")
+
+        meta_parts = [f"优先级：{_PRIO_ZH.get(priority, priority)}"]
+        if due:
+            meta_parts.append(f"截止：{due}")
+        if owner:
+            meta_parts.append(f"负责人：{owner}")
+        meta = "  ".join(meta_parts)
+
+        elements.append({
+            "tag": "column_set",
+            "flex_mode": "none",
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 5,
+                    "elements": [{
+                        "tag": "div",
+                        "text": {"tag": "lark_md",
+                                 "content": f"**{i + 1}. {title}**\n{meta}"},
+                    }],
+                },
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "elements": [{
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "新增"},
+                        "type": "primary",
+                        "value": {
+                            "action": "save_todo_one",
+                            "chat_id": chat_id,
+                            "index": i,
+                            "saved_count": saved_count,
+                        },
+                    }],
+                },
+            ],
+        })
+
+    title_text = (f"✅ 已新增 {saved_count} 条，还剩 {len(todos)} 条"
+                  if saved_count > 0
+                  else f"📋 建议新增 {len(todos)} 条待办")
+    elements.extend([
+        {"tag": "hr"},
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "✓ 全部新增"},
+                    "type": "primary",
+                    "value": {"action": "save_todo_all", "chat_id": chat_id,
+                              "saved_count": saved_count},
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "✗ 跳过"},
+                    "type": "danger",
+                    "value": {"action": "skip_todos", "chat_id": chat_id},
+                },
+            ],
+        },
+    ])
+    return {
+        "config": {"wide_screen_mode": True, "enable_forward": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": title_text},
+            "template": "blue" if saved_count == 0 else "green",
+        },
+        "elements": elements,
+    }
+
+
+async def send_todo_confirm_card(chat_id: str, todos: list[dict],
+                                  app_id: str, app_secret: str):
+    token = await get_tenant_token(app_id, app_secret)
+    card = build_todo_confirm_card(todos, chat_id)
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{FEISHU_BASE}/im/v1/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"receive_id_type": "chat_id"},
+            json={"receive_id": chat_id, "msg_type": "interactive",
+                  "content": json.dumps(card)},
+        )
+
+
+def card_todo_saved_response(count: int) -> dict:
+    return {
+        "toast": {"type": "success", "content": f"已新增 {count} 条待办"},
+        "card": {
+            "type": "raw",
+            "data": {
+                "config": {"enable_forward": False},
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md",
+                             "content": f"✅ 已新增 {count} 条待办。用 /todo list 查看。"},
+                }],
+            },
+        },
+    }
+
+
+def card_todo_one_saved_response(title: str, remaining: list[dict],
+                                  chat_id: str, saved_count: int) -> dict:
+    updated = build_todo_confirm_card(remaining, chat_id, saved_count)
+    return {
+        "toast": {"type": "success", "content": f"已新增：{title[:20]}"},
+        "card": {"type": "raw", "data": updated},
+    }
+
+
+def card_todo_skipped_response() -> dict:
+    return {
+        "toast": {"type": "info", "content": "已跳过"},
+        "card": {
+            "type": "raw",
+            "data": {
+                "config": {"enable_forward": False},
+                "elements": [{
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": "⏭ 已跳过待办建议。"},
                 }],
             },
         },

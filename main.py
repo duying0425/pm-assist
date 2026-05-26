@@ -182,8 +182,59 @@ async def _handle_card_callback(body: dict) -> dict:
             _save_fact_item(item)
         db.clear_pending(chat_id)
         return feishu.card_saved_response(prev_saved + len(pending))
+
+    # ── 待办确认卡片 ──
+    if action == "save_todo_one":
+        return await _card_save_todo_one(value, chat_id)
+    if action == "save_todo_all":
+        return _card_save_todo_all(value, chat_id)
+    if action == "skip_todos":
+        db.clear_pending_todos(chat_id)
+        return feishu.card_todo_skipped_response()
+
     db.clear_pending(chat_id)
     return feishu.card_skipped_response()
+
+
+def _save_todo_item(t: dict):
+    db.add_todo(
+        t["title"],
+        body=t.get("body", ""),
+        priority=t.get("priority", "medium"),
+        owner=t.get("owner", ""),
+        due_date=t.get("due_date", ""),
+        project=t.get("project", "默认"),
+        source_fact_id=t.get("source_fact_id"),
+        plan_id=t.get("plan_id"),
+        source="ai",
+    )
+
+
+async def _card_save_todo_one(value: dict, chat_id: str) -> dict:
+    index = int(value.get("index", -1))
+    saved_count = int(value.get("saved_count", 0))
+    saved, remaining = db.pop_pending_todo(chat_id, index)
+    if saved:
+        _save_todo_item(saved)
+        saved_count += 1
+        if remaining:
+            return feishu.card_todo_one_saved_response(
+                saved["title"], remaining, chat_id, saved_count
+            )
+        return feishu.card_todo_saved_response(saved_count)
+    return feishu.card_todo_skipped_response()
+
+
+def _card_save_todo_all(value: dict, chat_id: str) -> dict:
+    prev_saved = int(value.get("saved_count", 0))
+    pending = db.get_pending_todos(chat_id)
+    if pending:
+        for t in pending:
+            _save_todo_item(t)
+        db.clear_pending_todos(chat_id)
+        return feishu.card_todo_saved_response(prev_saved + len(pending))
+    db.clear_pending_todos(chat_id)
+    return feishu.card_todo_skipped_response()
 
 
 async def _handle_card_trigger(event: dict) -> dict:
@@ -221,6 +272,15 @@ async def _handle_card_trigger(event: dict) -> dict:
             )
             log.info("rejected user %s name=%s", open_id, name)
             return feishu.card_rejected_response(name)
+
+        # ── 待办确认卡片 ──
+        if action == "save_todo_one":
+            return await _card_save_todo_one(value, chat_id)
+        if action == "save_todo_all":
+            return _card_save_todo_all(value, chat_id)
+        if action == "skip_todos":
+            db.clear_pending_todos(chat_id)
+            return feishu.card_todo_skipped_response()
 
         # ── 知识库确认卡片 ──
         if action == "save_one":
@@ -421,7 +481,7 @@ async def _handle_message(event: dict):
                                    FEISHU_APP_ID, FEISHU_APP_SECRET)
             return
         if text.startswith("/admin fact decompose"):
-            reply = await _handle_admin_fact_decompose(text)
+            reply = await _handle_admin_fact_decompose(text, chat_id=chat_id)
         else:
             reply = _handle_admin(text, sender_open_id, project, chat_id)
         await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
@@ -448,24 +508,59 @@ async def _handle_message(event: dict):
     if text == "/clear":
         db.clear_history(chat_id)
         db.clear_pending(chat_id)
+        db.clear_pending_todos(chat_id)
         await feishu.send_text(chat_id, "对话历史已清除。", FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     # ── AI 对话（member/pm/super_admin 均可，上下文深度不同）──
     db.clear_pending(chat_id)
+    db.clear_pending_todos(chat_id)
 
     db.add_message(chat_id, "user", text)
     history = db.get_history(chat_id, MAX_HISTORY)
     context = db.get_full_context(project)
     sender_info_str = _sender_info(user)
-    reply = await claude_client.chat(history, context,
-                                     sender_info=sender_info_str, role=user_role)
-    db.add_message(chat_id, "assistant", reply)
-    await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
 
-    # 仅 PM 和管理员触发信息提取卡片
+    # 先发"思考中"占位消息，拿到 message_id 以便后续原地更新
+    msg_id = ""
+    try:
+        msg_id = await feishu.send_text_return_id(
+            chat_id, "⏳ 思考中...", FEISHU_APP_ID, FEISHU_APP_SECRET
+        )
+    except Exception:
+        log.warning("failed to send thinking indicator for chat_id=%s", chat_id)
+
+    try:
+        reply = await asyncio.wait_for(
+            claude_client.chat(history, context,
+                               sender_info=sender_info_str, role=user_role),
+            timeout=60.0,
+        )
+    except asyncio.TimeoutError:
+        reply = "AI 响应超时，请稍后重试。"
+        log.warning("AI chat timeout chat_id=%s", chat_id)
+    except Exception:
+        reply = "AI 响应出错，请稍后重试。"
+        log.exception("AI chat error chat_id=%s", chat_id)
+
+    db.add_message(chat_id, "assistant", reply)
+
+    # 用实际回复更新占位消息；超长时追加发送后续分块
+    if msg_id:
+        updated = await feishu.update_message_text(msg_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        if not updated:
+            log.warning("PATCH message failed, falling back to new message chat_id=%s msg_id=%s", chat_id, msg_id)
+            await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        elif len(reply) > 4000:
+            for chunk in feishu._split(reply[4000:], 4000):
+                await feishu.send_text(chat_id, chunk, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    else:
+        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+
+    # 仅 PM 和管理员触发信息提取卡片 + 待办意图提取
     if user_role in ("pm", "super_admin"):
         asyncio.create_task(_extract_and_card(chat_id, text, project))
+        asyncio.create_task(_extract_todos_and_card(chat_id, text, project))
 
 
 def _register_text() -> str:
@@ -568,6 +663,19 @@ async def _extract_and_card(chat_id: str, text: str, project: str = "默认"):
         await feishu.send_confirm_card(chat_id, enriched, FEISHU_APP_ID, FEISHU_APP_SECRET)
     except Exception:
         log.exception("extract_and_card error")
+
+
+async def _extract_todos_and_card(chat_id: str, text: str, project: str = "默认"):
+    try:
+        todos = await claude_client.extract_todo_intent(text)
+        if not todos:
+            return
+        for t in todos:
+            t["project"] = project
+        db.save_pending_todos(chat_id, todos)
+        await feishu.send_todo_confirm_card(chat_id, todos, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    except Exception:
+        log.exception("extract_todos_and_card error")
 
 
 # ── Todo 命令（所有用户）────────────────────────────────────
@@ -689,7 +797,7 @@ def _handle_todo(text: str, project: str = "默认") -> str:
 
 # ── 管理员 async 命令（需要 AI 调用）────────────────────────
 
-async def _handle_admin_fact_decompose(text: str) -> str:
+async def _handle_admin_fact_decompose(text: str, chat_id: str = "") -> str:
     parts = text.split(None, 4)
     if len(parts) < 4 or not parts[3].isdigit():
         return "用法：/admin fact decompose [ID]"
@@ -702,6 +810,16 @@ async def _handle_admin_fact_decompose(text: str) -> str:
     todos = await claude_client.decompose_risk(fact)
     if not todos:
         return "AI 未能分解出待办事项，请检查条目内容是否足够具体"
+    # 标记来源 fact，以便确认后写入时保留追溯关系
+    project = fact.get("project", "默认")
+    for t in todos:
+        t["source_fact_id"] = fact_id
+        t["project"] = project
+    if chat_id:
+        db.save_pending_todos(chat_id, todos)
+        await feishu.send_todo_confirm_card(chat_id, todos, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return f"已为 #{fact_id}《{fact['title'][:20]}》生成 {len(todos)} 条待办建议，请在卡片中确认。"
+    # 无 chat_id 时直接入库（兜底，正常不会走到这里）
     saved: list[tuple[int, str]] = []
     for t in todos:
         tid = db.add_todo(
@@ -711,7 +829,7 @@ async def _handle_admin_fact_decompose(text: str) -> str:
             owner=t.get("owner", ""),
             source_fact_id=fact_id,
             source="ai",
-            project=fact.get("project", "默认"),
+            project=project,
         )
         saved.append((tid, t["title"]))
     lines = [f"已从 #{fact_id}《{fact['title']}》分解 {len(saved)} 条待办："]
