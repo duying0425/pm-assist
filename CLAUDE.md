@@ -286,7 +286,7 @@ event_id（PRIMARY KEY）/ created_at
 17. **@mention 缓存**：消息中 @某人 时自动缓存姓名↔open_id 到 org_units 表，文本保留 @姓名 传给 AI
 18. **版本管理**：`VERSION` 文件 + `/version` 命令
 19. **注册与权限系统**：用户自主注册、管理员审批、三角色差异化 AI 上下文、说话人身份注入（v0.6.0）
-20. **飞书 post 富文本消息支持**：同时处理 `text` 和 `post` 两种消息类型，解析 at/text/a 节点，剔除 @Bot 节点后正常进入对话流程
+20. **飞书 post 富文本消息支持**：同时处理 `text` 和 `post` 两种消息类型，解析 at/text/a 节点，剔除 @Bot 节点后正常进入对话流程；段落间保留 `\n` 换行，编号列表等排版结构完整传给 AI（v0.6.1）
 
 ## 命令速查
 
@@ -370,7 +370,7 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - APScheduler 的定时任务在服务重启后重新注册，若服务在 00:30 后重启，当天洗盘会跳过（次日才补跑）
 
 ## 服务器当前状态
-- v0.6.0 架构（含 post 消息支持 + bug 修复），待部署
+- v0.6.1 已部署（post 段落换行修复）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
 - todos/users/projects 表由 `init_db()` 自动创建，无需手动迁移
 - notify.py 的 crontab 条目已删除（早报改由 APScheduler 统一发送）

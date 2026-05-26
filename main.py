@@ -322,24 +322,27 @@ async def _handle_message(event: dict):
 
     if msg_type == "post":
         # 飞书 post 消息：直接是 {"title":..., "content":[...]}，无语言包装层
+        # content 外层为段落数组，内层为行内节点；段落间用 \n 分隔保留排版
         post_body = raw.get("zh_cn") or raw.get("en_us") or raw
-        parts = []
+        para_texts = []
         for paragraph in post_body.get("content", []):
+            inline = []
             for node in paragraph:
                 tag = node.get("tag", "")
                 if tag == "text":
-                    parts.append(node.get("text", ""))
+                    inline.append(node.get("text", ""))
                 elif tag == "at":
                     uid  = node.get("user_id", "")
                     uname = node.get("user_name", "")
                     if uid and uname:
                         db.upsert_person(uid, uname)
                     if not node.get("is_bot", False):
-                        parts.append(f"@{uname}" if uname else "")
+                        inline.append(f"@{uname}" if uname else "")
                 elif tag == "a":
-                    parts.append(node.get("text", ""))
+                    inline.append(node.get("text", ""))
                 # img 等其他 tag 跳过
-        text = "".join(parts).strip()
+            para_texts.append("".join(inline))
+        text = "\n".join(para_texts).strip()
         # 去掉 post 消息开头的 @Bot（飞书群里 @Bot 会在富文本首节点）
         # 注：post 消息的 mentions 字段与 text 消息相同
         for mention in message.get("mentions", []):
