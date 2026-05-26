@@ -975,7 +975,7 @@ async def _handle_join(text: str, sender_open_id: str, user: dict) -> str:
         return "你已经是管理员，无需申请注册。"
 
     # 已经是 active 用户
-    if user.get("status") == "active":
+    if user.get("status") == "active" and user.get("project"):
         role_zh = _ROLE_ZH.get(user.get("role", ""), user.get("role", ""))
         return (f"你已注册为「{role_zh}」，绑定项目「{user.get('project', '')}」。\n"
                 "如需变更角色或项目，请联系管理员。")
