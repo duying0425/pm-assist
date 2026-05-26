@@ -211,6 +211,7 @@ async def nightly_review(facts_text: str) -> str:
         response = await _client.chat.completions.create(
             model=AI_MODEL,
             max_tokens=8000,
+            timeout=90,
             messages=[{"role": "user", "content": prompt}],
         )
         content = response.choices[0].message.content or ""
@@ -225,6 +226,7 @@ async def nightly_review(facts_text: str) -> str:
         response = await _client.chat.completions.create(
             model=AI_MODEL,
             max_tokens=8000,
+            timeout=90,
             messages=[{"role": "user", "content": retry_prompt}],
         )
         content = response.choices[0].message.content or ""

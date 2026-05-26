@@ -717,6 +717,7 @@ async def _handle_message(event: dict):
         if text.startswith("/admin fact decompose"):
             reply = await _handle_admin_fact_decompose(text, chat_id=chat_id)
         elif text.startswith("/admin review run"):
+            await feishu.send_text(chat_id, "开始 AI 洗盘，完成后会发送报告。", FEISHU_APP_ID, FEISHU_APP_SECRET)
             reply = await _handle_admin_review_run(text, chat_id=chat_id)
         else:
             reply = _handle_admin(text, sender_open_id, project, chat_id)
