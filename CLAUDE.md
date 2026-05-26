@@ -307,7 +307,7 @@ key / value / updated_at
 9. **相似性去重**：提取时匹配已有条目，卡片上区分"新增"和"追加 #ID"
 10. **交互卡片确认**：逐条确认，支持"全部保存"/"跳过"；卡片标题动态显示进度；计数正确累加
 11. **对话历史清除**：`/clear` 命令
-12. **定时 AI 洗盘 + 早报推送**：凌晨 00:30 洗盘存 DB；09:00 推送给 ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS（APScheduler 内置）；支持 `report_only/direct_cleanup` 两种模式
+12. **定时 AI 洗盘 + 早报推送**：每天 09:00 执行洗盘并立即推送给 ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS（APScheduler 内置）；支持 `report_only/direct_cleanup` 两种模式
 13. **待办事项系统**：`/todo` 命令新建/查询/完成/取消；支持关联 risk 追溯、挂载里程碑；AI 上下文带 todo 信息
 14. **AI 分解 risk**：`/admin fact decompose [ID]` 自动将风险拆解为可执行 todo 列表
 15. **时间戳上下文**：所有 facts 条目在 AI 上下文中带记录/更新日期，AI 可判断信息时效
@@ -416,7 +416,7 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - SSH 登录用 `duyingfang` 而非 `root`
 - `aliyun.tmhcorps.cn` DNS 须设为"仅DNS"（灰云），否则 SSH 被 Cloudflare 拦截
 - 飞书卡片回调响应 body 必须包含 `card.type="raw"` 和 `data` 包装层
-- APScheduler 的定时任务在服务重启后重新注册，若服务在 00:30 后重启，当天洗盘会跳过（次日才补跑）
+- APScheduler 的定时任务在服务重启后重新注册，若服务在 09:00 后重启，当天洗盘+早报会跳过（次日才补跑）
 - AI 洗盘 `direct_cleanup` 只执行报告中带 `[AUTO]` 前缀的低风险 facts 命令；请先用 `/admin review run report` 观察建议质量；目前不会直接清洗 todos
 - Web 后台概览页可切换洗盘模式，但没有单独登录认证，仍按内部工具处理
 

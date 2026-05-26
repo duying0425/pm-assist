@@ -297,44 +297,34 @@ async def _send_action_candidates_card(chat_id: str, report: str):
     log.info("sent %d action candidates to chat_id=%s", len(candidates), chat_id)
 
 
-async def _run_nightly_review():
-    """凌晨0:30：AI分析所有facts，清洗报告存入DB。"""
-    try:
-        await _build_and_save_review()
-    except Exception:
-        log.exception("nightly review error")
-
-
-async def _send_morning_report():
-    """早上9:00：发送风险日报 + AI洗盘报告给所有收件人。
-    收件人 = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS（与 notify.py 独立脚本逻辑一致）。
+async def _morning_review_and_report():
+    """每天09:00：先执行AI洗盘，再发送风险日报 + 洗盘报告给所有收件人。
+    收件人 = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS。
     注意：如果同时开了 crontab 跑 notify.py，主管理员会收到两次，二选一即可。
     """
     from config import NOTIFY_OPEN_IDS
     try:
+        report = await _build_and_save_review()
+        review_text = _strip_merge_candidates_json(report) if report else None
         recipients = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS
         if not recipients:
             log.warning("no recipients configured (ADMIN_OPEN_IDS and NOTIFY_OPEN_IDS both empty)")
             return
-        review = db.get_latest_nightly_review()
-        if not review:
-            log.warning("morning report: no nightly review found (00:30 job may not have run yet)")
-        report = _notify.build_morning_report(review)
+        morning_report = _notify.build_morning_report(review_text)
         for uid in recipients:
-            await feishu.send_text_to_user(uid, report, FEISHU_APP_ID, FEISHU_APP_SECRET)
+            await feishu.send_text_to_user(uid, morning_report, FEISHU_APP_ID, FEISHU_APP_SECRET)
         log.info("morning report sent to %d recipients: %s", len(recipients), recipients)
     except Exception:
-        log.exception("morning report error")
+        log.exception("morning review and report error")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
     log.info("DB initialized")
-    _scheduler.add_job(_run_nightly_review, "cron", hour=0, minute=30, id="nightly_review")
-    _scheduler.add_job(_send_morning_report, "cron", hour=9, minute=0, id="morning_report")
+    _scheduler.add_job(_morning_review_and_report, "cron", hour=9, minute=0, id="morning_report")
     _scheduler.start()
-    log.info("Scheduler started: nightly_review@00:30, morning_report@09:00 (Asia/Shanghai)")
+    log.info("Scheduler started: morning_review_and_report@09:00 (Asia/Shanghai)")
     yield
     _scheduler.shutdown()
 

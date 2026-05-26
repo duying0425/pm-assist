@@ -98,7 +98,7 @@ async def chat(history: list[dict], context: dict,
     system = _build_system(context, sender_info=sender_info, role=role)
     response = await _client.chat.completions.create(
         model=AI_MODEL,
-        max_tokens=4000,
+        max_tokens=8000,
         messages=[{"role": "system", "content": system}] + history,
     )
     return response.choices[0].message.content
@@ -217,8 +217,8 @@ async def nightly_review(facts_text: str) -> str:
     try:
         response = await _client.chat.completions.create(
             model=AI_MODEL,
-            max_tokens=8000,
-            timeout=90,
+            max_tokens=16000,
+            timeout=180,
             messages=[{"role": "user", "content": prompt}],
         )
         content = response.choices[0].message.content or ""
@@ -232,8 +232,8 @@ async def nightly_review(facts_text: str) -> str:
         )
         response = await _client.chat.completions.create(
             model=AI_MODEL,
-            max_tokens=8000,
-            timeout=90,
+            max_tokens=16000,
+            timeout=180,
             messages=[{"role": "user", "content": retry_prompt}],
         )
         content = response.choices[0].message.content or ""
@@ -248,7 +248,7 @@ async def extract_facts(text: str) -> list[dict]:
     try:
         response = await _client.chat.completions.create(
             model=AI_MODEL,
-            max_tokens=800,
+            max_tokens=1500,
             messages=[{"role": "user", "content": _EXTRACT_PROMPT + text}],
         )
         import json
@@ -291,7 +291,7 @@ async def decompose_risk(fact: dict) -> list[dict]:
     try:
         response = await _client.chat.completions.create(
             model=AI_MODEL,
-            max_tokens=1000,
+            max_tokens=2000,
             messages=[{"role": "user", "content": _DECOMPOSE_PROMPT + fact_text}],
         )
         raw = response.choices[0].message.content.strip()
@@ -332,7 +332,7 @@ async def extract_todo_intent(text: str) -> list[dict]:
     try:
         response = await _client.chat.completions.create(
             model=AI_MODEL,
-            max_tokens=500,
+            max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = response.choices[0].message.content.strip()
