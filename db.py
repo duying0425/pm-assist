@@ -112,6 +112,21 @@ def init_db():
                 items_json  TEXT    NOT NULL,
                 created_at  INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS todos (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                title           TEXT    NOT NULL,
+                body            TEXT    NOT NULL DEFAULT '',
+                status          TEXT    NOT NULL DEFAULT 'open',
+                priority        TEXT    NOT NULL DEFAULT 'medium',
+                owner           TEXT    NOT NULL DEFAULT '',
+                due_date        TEXT    NOT NULL DEFAULT '',
+                project         TEXT    NOT NULL DEFAULT 'yadi',
+                source_fact_id  INTEGER DEFAULT NULL,
+                plan_id         INTEGER DEFAULT NULL,
+                source          TEXT    NOT NULL DEFAULT 'manual',
+                created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            );
         """)
         # upgrade: add dimension column if coming from old schema
         try:
@@ -397,6 +412,174 @@ def list_org_units(type_: str | None = None, active_only: bool = True) -> list:
         return conn.execute(f"SELECT * FROM org_units {where} ORDER BY parent_id, id", params).fetchall()
 
 
+def upsert_person(open_id: str, name: str):
+    """缓存飞书用户 open_id ↔ 姓名映射到 org_units（type='person'）。"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, name FROM org_units WHERE feishu_id=? AND type='person'", (open_id,)
+        ).fetchone()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if row:
+            if row["name"] != name:
+                conn.execute("UPDATE org_units SET name=? WHERE id=?", (name, row["id"]))
+        else:
+            conn.execute(
+                "INSERT INTO org_units(type,name,feishu_id,created_at) VALUES(?,?,?,?)",
+                ("person", name, open_id, now),
+            )
+
+
+# ── Todos CRUD ────────────────────────────────────────────
+
+def add_todo(title: str, body: str = "", priority: str = "medium", owner: str = "",
+             due_date: str = "", project: str = "yadi",
+             source_fact_id: int | None = None, plan_id: int | None = None,
+             source: str = "manual") -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO todos(title,body,priority,owner,due_date,project,source_fact_id,plan_id,source)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (title, body, priority, owner, due_date, project, source_fact_id, plan_id, source),
+        )
+        return cur.lastrowid
+
+
+def get_todo(todo_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM todos WHERE id=?", (todo_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_todo(todo_id: int, **kwargs):
+    allowed = {"title", "body", "status", "priority", "owner", "due_date"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values())
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE todos SET {sets}, updated_at=datetime('now','localtime') WHERE id=?",
+            (*vals, todo_id),
+        )
+
+
+def list_todos(status: str | None = "open", project: str | None = "yadi",
+               source_fact_id: int | None = None, plan_id: int | None = None) -> list:
+    clauses, params = [], []
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    if project:
+        clauses.append("project=?")
+        params.append(project)
+    if source_fact_id is not None:
+        clauses.append("source_fact_id=?")
+        params.append(source_fact_id)
+    if plan_id is not None:
+        clauses.append("plan_id=?")
+        params.append(plan_id)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with get_conn() as conn:
+        return conn.execute(
+            f"SELECT * FROM todos {where}"
+            " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id",
+            params,
+        ).fetchall()
+
+
+def get_todos_for_context(project: str = "yadi",
+                          open_limit: int = 30,
+                          done_limit: int = 10,
+                          done_days: int = 14) -> str:
+    """返回待办事项文本，供 AI 上下文注入。包含 open 条目和近期完成条目，均带时间信息。"""
+    from datetime import datetime as _dt, timedelta as _td
+    _PRIO = {"high": "高", "medium": "中", "low": "低"}
+    _RISK_ZH = {"risk": "风险", "issue": "问题", "blocker": "阻塞", "dependency": "依赖"}
+    cutoff = (_dt.now() - _td(days=done_days)).strftime("%Y-%m-%d")
+
+    with get_conn() as conn:
+        open_rows = conn.execute(
+            "SELECT * FROM todos WHERE status='open' AND project=?"
+            " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id"
+            " LIMIT ?",
+            (project, open_limit),
+        ).fetchall()
+        done_rows = conn.execute(
+            "SELECT * FROM todos WHERE status='done' AND project=? AND updated_at >= ?"
+            " ORDER BY updated_at DESC LIMIT ?",
+            (project, cutoff, done_limit),
+        ).fetchall()
+
+    if not open_rows and not done_rows:
+        return ""
+
+    # 批量拉取关联 fact 标题
+    fact_ids = set()
+    for r in open_rows:
+        if r["source_fact_id"]: fact_ids.add(r["source_fact_id"])
+        if r["plan_id"]:        fact_ids.add(r["plan_id"])
+    fact_map: dict[int, dict] = {}
+    if fact_ids:
+        with get_conn() as conn:
+            placeholders = ",".join("?" * len(fact_ids))
+            for row in conn.execute(
+                f"SELECT id, type, title FROM facts WHERE id IN ({placeholders})",
+                list(fact_ids),
+            ).fetchall():
+                fact_map[row["id"]] = dict(row)
+
+    # 分组
+    risk_groups: dict[int, list] = {}
+    plan_groups: dict[int, list] = {}
+    standalone: list = []
+    for r in open_rows:
+        r = dict(r)
+        if r["source_fact_id"]:
+            risk_groups.setdefault(r["source_fact_id"], []).append(r)
+        elif r["plan_id"]:
+            plan_groups.setdefault(r["plan_id"], []).append(r)
+        else:
+            standalone.append(r)
+
+    def _fmt(r: dict) -> str:
+        p = _PRIO.get(r["priority"], "")
+        line = f"- [ ] #T{r['id']} {r['title']}"
+        if p and p != "中": line += f" [{p}]"
+        if r["owner"]:    line += f"  owner:{r['owner']}"
+        if r["due_date"]: line += f"  due:{r['due_date']}"
+        line += f"  创建:{r['created_at'][:10]}"
+        return line
+
+    lines: list[str] = []
+
+    for fid, items in risk_groups.items():
+        fact = fact_map.get(fid, {})
+        ft_zh = _RISK_ZH.get(fact.get("type", ""), "事项")
+        lines.append(f"**来自{ft_zh} #{fid}（{fact.get('title','?')[:25]}）**")
+        lines.extend(_fmt(r) for r in items)
+
+    for pid, items in plan_groups.items():
+        fact = fact_map.get(pid, {})
+        lines.append(f"**挂载到里程碑 #{pid}（{fact.get('title','?')[:25]}）**")
+        lines.extend(_fmt(r) for r in items)
+
+    if standalone:
+        lines.append("**独立待办**")
+        lines.extend(_fmt(r) for r in standalone)
+
+    if done_rows:
+        lines.append(f"**近期完成（{done_days}天内）**")
+        for r in done_rows:
+            r = dict(r)
+            line = f"- [x] #T{r['id']} {r['title']}"
+            if r["owner"]: line += f"  owner:{r['owner']}"
+            line += f"  完成:{r['updated_at'][:10]}"
+            lines.append(line)
+
+    return "\n".join(lines)
+
+
 # ── AI 上下文拼装（三层结构）─────────────────────────────────
 
 def get_full_context(project: str = "yadi") -> dict:
@@ -429,7 +612,7 @@ def get_full_context(project: str = "yadi") -> dict:
 
         # Layer 2: 风险（dimension=risk）
         risk_rows = conn.execute(
-            "SELECT id, type, title, body, owner, priority, due_date FROM facts"
+            "SELECT id, type, title, body, owner, priority, due_date, created_at, updated_at FROM facts"
             " WHERE dimension='risk' AND status='active' AND project=?"
             " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id",
             (project,)
@@ -437,21 +620,21 @@ def get_full_context(project: str = "yadi") -> dict:
 
         # Layer 3: 进度（dimension=schedule）
         schedule_rows = conn.execute(
-            "SELECT id, type, title, body, due_date FROM facts"
+            "SELECT id, type, title, body, due_date, created_at, updated_at FROM facts"
             " WHERE dimension='schedule' AND status='active' AND project=?"
             " ORDER BY due_date, id", (project,)
         ).fetchall()
 
         # Layer 4: 决策（dimension=decision）
         decision_rows = conn.execute(
-            "SELECT id, title, body FROM facts"
+            "SELECT id, title, body, created_at, updated_at FROM facts"
             " WHERE dimension='decision' AND status='active'"
             " ORDER BY id"
         ).fetchall()
 
         # Layer 5: 相关方 + 资源（stakeholder/resource/scope）
         ref_rows = conn.execute(
-            "SELECT id, type, title, body FROM facts"
+            "SELECT id, type, title, body, updated_at FROM facts"
             " WHERE dimension IN ('stakeholder','resource','scope') AND status='active'"
             " ORDER BY dimension, id"
         ).fetchall()
@@ -473,8 +656,12 @@ def get_full_context(project: str = "yadi") -> dict:
             t = _TYPE_ZH.get(r["type"], r["type"])
             p = _PRIO.get(r["priority"], r["priority"])
             line = f"[{t}·{p}] #{r['id']} {r['title']}：{r['body']}"
-            if r["owner"]:  line += f"（负责人：{r['owner']}）"
+            if r["owner"]:    line += f"（负责人：{r['owner']}）"
             if r["due_date"]: line += f"（截止：{r['due_date']}）"
+            line += f"（记录:{r['created_at'][:10]}"
+            if r["updated_at"][:10] != r["created_at"][:10]:
+                line += f" 更新:{r['updated_at'][:10]}"
+            line += "）"
             lines.append(line)
         return "\n".join(lines)
 
@@ -485,7 +672,11 @@ def get_full_context(project: str = "yadi") -> dict:
         for r in rows:
             t = _TYPE_ZH.get(r["type"], r["type"])
             line = f"[{t}] #{r['id']} {r['title']}"
-            if r["due_date"]: line += f"（{r['due_date']}）"
+            if r["due_date"]: line += f"（目标:{r['due_date']}）"
+            line += f"（记录:{r['created_at'][:10]}"
+            if r["updated_at"][:10] != r["created_at"][:10]:
+                line += f" 更新:{r['updated_at'][:10]}"
+            line += "）"
             if r["body"] and r["body"] != r["title"]: line += f"：{r['body'][:80]}"
             lines.append(line)
         return "\n".join(lines)
@@ -493,7 +684,12 @@ def get_full_context(project: str = "yadi") -> dict:
     def fmt_generic(rows):
         if not rows:
             return ""
-        return "\n\n".join(f"【{r['title']}】\n{r['body']}" for r in rows)
+        parts = []
+        for r in rows:
+            updated = r["updated_at"][:10] if r.get("updated_at") else ""
+            header = f"【{r['title']}】" + (f"（更新:{updated}）" if updated else "")
+            parts.append(f"{header}\n{r['body']}")
+        return "\n\n".join(parts)
 
     return {
         "dept_assumptions":    fmt_assumption(dept_rows),
@@ -502,6 +698,7 @@ def get_full_context(project: str = "yadi") -> dict:
         "schedule":            fmt_schedule(schedule_rows),
         "decisions":           fmt_generic(decision_rows),
         "references":          fmt_generic(ref_rows),
+        "todos":               get_todos_for_context(project),
     }
 
 

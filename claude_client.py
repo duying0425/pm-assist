@@ -19,11 +19,15 @@ _ROLE = """你是东软睿驰自动驾驶团队的内部PM助手，专门帮助P
 - 解答公司流程和规范相关问题
 - 帮助新人PM避免内耗和常见失误
 
-回答风格：简洁实用，直接给可操作建议；多步骤时给清单；判断该找谁时明确说人/团队名称。"""
+回答风格：简洁实用，直接给可操作建议；多步骤时给清单；判断该找谁时明确说人/团队名称。
+
+重要约束：
+- 当用户提供事实类信息（人员分工、里程碑节点、风险、决策等），不要说"已记录"、"已保存"、"我会记住"等暗示已持久化的话，系统会自动提示用户确认是否保存到知识库
+- 信息提取和保存由系统后台处理，你的职责是理解并给出建议，不是替代存储动作"""
 
 _CONTEXT_TEMPLATE = """{role}
 
-{dept_section}{project_section}{risk_section}{schedule_section}{decision_section}{ref_section}"""
+{dept_section}{project_section}{todos_section}{risk_section}{schedule_section}{decision_section}{ref_section}"""
 
 
 def _build_system(context: dict) -> str:
@@ -34,6 +38,7 @@ def _build_system(context: dict) -> str:
 
     dept_section     = section("部门预设（团队公认背景知识）", context.get("dept_assumptions", ""))
     project_section  = section("当前项目背景", context.get("project_assumptions", ""))
+    todos_section    = section("待办事项（带追溯和时间信息）", context.get("todos", ""))
     risk_section     = section("当前活跃风险与问题", context.get("risks") or "（暂无已登记风险）")
     schedule_section = section("里程碑与计划节点", context.get("schedule", ""))
     decision_section = section("关键决策记录", context.get("decisions", ""))
@@ -43,6 +48,7 @@ def _build_system(context: dict) -> str:
         role=_ROLE,
         dept_section=dept_section,
         project_section=project_section,
+        todos_section=todos_section,
         risk_section=risk_section,
         schedule_section=schedule_section,
         decision_section=decision_section,
@@ -141,3 +147,43 @@ async def extract_facts(text: str) -> list[dict]:
     except Exception:
         pass
     return []
+
+
+_DECOMPOSE_PROMPT = """你是项目管理专家。将以下风险/问题分解为2-6条具体可执行的待办事项。
+
+要求：
+- 每条必须是一个具体行动（动词开头），不是风险描述的重复
+- priority 只能是 high / medium / low
+- owner 留空，除非原始信息有明确提及具体姓名
+- body 写执行说明或注意事项，无特殊要求可留空
+
+返回格式（仅 JSON，不要其他内容）：
+{"todos": [{"title": "...", "body": "...", "priority": "medium", "owner": ""}]}
+
+风险/问题：
+"""
+
+
+async def decompose_risk(fact: dict) -> list[dict]:
+    """用 AI 将一个 risk/issue/blocker 条目分解为可执行 todo 列表。"""
+    import json
+    _PRIO_ZH = {"high": "高", "medium": "中", "low": "低"}
+    fact_text = (
+        f"#{fact['id']} [{fact['type']}] {fact['title']}\n"
+        f"优先级：{_PRIO_ZH.get(fact.get('priority', ''), '—')}\n"
+        f"负责人：{fact.get('owner', '') or '—'}\n"
+        f"正文：{fact['body']}"
+    )
+    try:
+        response = await _client.chat.completions.create(
+            model=AI_MODEL,
+            max_tokens=1000,
+            messages=[{"role": "user", "content": _DECOMPOSE_PROMPT + fact_text}],
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        result = json.loads(raw)
+        return result.get("todos", [])
+    except Exception:
+        return []

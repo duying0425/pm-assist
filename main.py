@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, FastAPI, Request
@@ -22,6 +23,8 @@ from config import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+
+_VERSION = (Path(__file__).parent / "VERSION").read_text().strip()
 
 _TYPE_LABELS = {
     "risk": "风险", "issue": "问题", "blocker": "阻塞", "dependency": "依赖",
@@ -240,7 +243,17 @@ async def _handle_message(event: dict):
     raw = json.loads(message.get("content", "{}"))
     text = raw.get("text", "").strip()
     for mention in message.get("mentions", []):
-        text = text.replace(mention.get("key", ""), "").strip()
+        key = mention.get("key", "")
+        if not key:
+            continue
+        if mention.get("is_bot", False):
+            text = text.replace(key, "").strip()
+        else:
+            open_id = mention.get("id", {}).get("open_id", "")
+            name = mention.get("name", "")
+            if open_id and name:
+                db.upsert_person(open_id, name)
+            text = text.replace(key, f"@{name}" if name else "").strip()
 
     log.info("text: %r", text)
     if not text:
@@ -250,8 +263,15 @@ async def _handle_message(event: dict):
         await feishu.send_text(chat_id, _help_text(), FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
+    if text == "/version":
+        await feishu.send_text(chat_id, f"pm-assist v{_VERSION}", FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return
+
     if text.startswith("/admin") and sender_open_id in ADMIN_OPEN_IDS:
-        reply = _handle_admin(text)
+        if text.startswith("/admin fact decompose"):
+            reply = await _handle_admin_fact_decompose(text)
+        else:
+            reply = _handle_admin(text)
         await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
@@ -260,6 +280,11 @@ async def _handle_message(event: dict):
         if note:
             bid = db.add_fact("knowledge", f"笔记#{db.count_notes() + 1}", note, source="manual")
             await feishu.send_text(chat_id, f"✓ 已记录 (ID:{bid})", FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return
+
+    if text.startswith("/todo"):
+        reply = _handle_todo(text)
+        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     if text == "/clear":
@@ -301,6 +326,155 @@ async def _extract_and_card(chat_id: str, text: str):
         await feishu.send_confirm_card(chat_id, enriched, FEISHU_APP_ID, FEISHU_APP_SECRET)
     except Exception:
         log.exception("extract_and_card error")
+
+
+# ── Todo 命令（所有用户）────────────────────────────────────
+
+def _fmt_todo_list(rows) -> str:
+    if not rows:
+        return "暂无待办事项"
+    _PRIO = {"high": "高", "medium": "中", "low": "低"}
+    _ICON = {"open": "[ ]", "done": "[x]", "cancelled": "[~]"}
+    open_count = sum(1 for r in rows if r["status"] == "open")
+    lines = [f"📋 待办（{open_count} 条进行中）\n"]
+    for r in rows:
+        r = dict(r)
+        icon = _ICON.get(r["status"], "[ ]")
+        p = _PRIO.get(r["priority"], "")
+        prio_tag = f" [{p}]" if p and p != "中" else ""
+        line = f"#T{r['id']} {icon}{prio_tag} {r['title']}"
+        details = []
+        if r["owner"]:    details.append(f"owner:{r['owner']}")
+        if r["due_date"]: details.append(f"due:{r['due_date']}")
+        details.append(f"创建:{r['created_at'][:10]}")
+        if r["status"] == "done": details.append(f"完成:{r['updated_at'][:10]}")
+        line += "\n   " + "  ".join(details)
+        src = []
+        if r["source_fact_id"]:
+            fact = db.get_fact(r["source_fact_id"])
+            if fact: src.append(f"← risk#{r['source_fact_id']}《{fact['title'][:20]}》")
+        if r["plan_id"]:
+            plan = db.get_fact(r["plan_id"])
+            if plan: src.append(f"← milestone#{r['plan_id']}《{plan['title'][:20]}》")
+        if src:
+            line += "\n   " + "  ".join(src)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _todo_help() -> str:
+    return (
+        "待办事项命令：\n"
+        "/todo list              查看进行中的待办\n"
+        "/todo list all          查看全部（含已完成）\n"
+        "/todo list risk [ID]    查看某风险关联的待办\n"
+        "/todo list plan [ID]    查看某里程碑挂载的待办\n"
+        "/todo [内容]             新建独立待办\n"
+        "/todo [内容] risk [ID]   从 risk 分解新建\n"
+        "/todo [内容] plan [ID]   挂到里程碑新建\n"
+        "/todo done [ID]         标记完成\n"
+        "/todo cancel [ID]       取消\n\n"
+        "管理员分解命令：\n"
+        "/admin fact decompose [ID]  AI 自动分解 risk 为待办列表"
+    )
+
+
+def _handle_todo(text: str) -> str:
+    import re
+    rest = text[len("/todo"):].strip()
+    if not rest or rest.lower() == "help":
+        return _todo_help()
+
+    parts = rest.split()
+    sub = parts[0].lower()
+
+    if sub == "list":
+        filter_type = parts[1].lower() if len(parts) > 1 else ""
+        if filter_type == "all":
+            rows = db.list_todos(status=None)
+        elif filter_type in ("risk", "plan") and len(parts) > 2:
+            try:
+                bind_id = int(parts[2])
+            except ValueError:
+                return "ID 必须是数字"
+            if filter_type == "risk":
+                rows = db.list_todos(status=None, source_fact_id=bind_id)
+            else:
+                rows = db.list_todos(status=None, plan_id=bind_id)
+        else:
+            rows = db.list_todos(status="open")
+        return _fmt_todo_list(rows)
+
+    if sub == "done" and len(parts) >= 2 and parts[1].isdigit():
+        tid = int(parts[1])
+        todo = db.get_todo(tid)
+        if not todo:
+            return f"找不到待办 #T{tid}"
+        db.update_todo(tid, status="done")
+        return f"✅ #T{tid} 已完成：{todo['title']}"
+
+    if sub == "cancel" and len(parts) >= 2 and parts[1].isdigit():
+        tid = int(parts[1])
+        todo = db.get_todo(tid)
+        if not todo:
+            return f"找不到待办 #T{tid}"
+        db.update_todo(tid, status="cancelled")
+        return f"↩ #T{tid} 已取消：{todo['title']}"
+
+    # 新建待办：支持末尾 "risk N" 或 "plan N" 绑定
+    content = rest
+    source_fact_id = None
+    plan_id = None
+    m = re.search(r'\s+(risk|plan)\s+(\d+)\s*$', content, re.IGNORECASE)
+    if m:
+        btype = m.group(1).lower()
+        bid   = int(m.group(2))
+        content = content[:m.start()].strip()
+        if btype == "risk":
+            source_fact_id = bid
+        else:
+            plan_id = bid
+
+    if not content:
+        return "请输入待办内容"
+
+    tid = db.add_todo(content, source_fact_id=source_fact_id, plan_id=plan_id)
+    suffix = (f"（关联 risk#{source_fact_id}）" if source_fact_id
+              else f"（挂载到 milestone#{plan_id}）" if plan_id
+              else "")
+    return f"✓ 已新增待办 #T{tid}：{content}{suffix}"
+
+
+# ── 管理员 async 命令（需要 AI 调用）────────────────────────
+
+async def _handle_admin_fact_decompose(text: str) -> str:
+    parts = text.split(None, 4)
+    if len(parts) < 4 or not parts[3].isdigit():
+        return "用法：/admin fact decompose [ID]"
+    fact_id = int(parts[3])
+    fact = db.get_fact(fact_id)
+    if not fact:
+        return f"找不到 fact #{fact_id}"
+    if fact["dimension"] != "risk":
+        return f"#{fact_id} 不是风险类型（dimension={fact['dimension']}），仅支持分解 risk/issue/blocker/dependency"
+    todos = await claude_client.decompose_risk(fact)
+    if not todos:
+        return "AI 未能分解出待办事项，请检查条目内容是否足够具体"
+    saved: list[tuple[int, str]] = []
+    for t in todos:
+        tid = db.add_todo(
+            t["title"],
+            body=t.get("body", ""),
+            priority=t.get("priority", "medium"),
+            owner=t.get("owner", ""),
+            source_fact_id=fact_id,
+            source="ai",
+        )
+        saved.append((tid, t["title"]))
+    lines = [f"已从 #{fact_id}《{fact['title']}》分解 {len(saved)} 条待办："]
+    for tid, title in saved:
+        lines.append(f"  #T{tid} {title}")
+    return "\n".join(lines)
 
 
 # ── 管理员命令 ────────────────────────────────────────────
@@ -671,28 +845,35 @@ def _help_text() -> str:
     return """PM助手使用说明
 
 所有人可用：
-  @Bot [消息]   AI对话（结合知识库和风险清单）
-  /note [内容]  快速记录一条笔记
-  /clear        清除当前会话历史
-  /help         显示本说明
+  @Bot [消息]              AI对话（结合知识库、风险和待办上下文）
+  /note [内容]             快速记录一条笔记
+  /todo list               查看进行中的待办
+  /todo list all           查看全部待办（含已完成）
+  /todo list risk [ID]     查看某风险关联的待办
+  /todo list plan [ID]     查看某里程碑挂载的待办
+  /todo [内容]              新建独立待办
+  /todo [内容] risk [ID]   从 risk 分解新建待办
+  /todo [内容] plan [ID]   挂到里程碑新建待办
+  /todo done [ID]          标记待办完成
+  /todo cancel [ID]        取消待办
+  /clear                   清除当前会话历史
+  /version                 查看当前版本号
+  /help                    显示本说明
 
-管理员 — 知识库（旧接口）：
-  /admin list
-  /admin add [分类] [标题] [内容]
-  /admin update/enable/disable/delete [ID]
-
-管理员 — 风险（快捷）：
+管理员 — 风险管理：
   /admin risk list [open|all]
   /admin risk close/reopen [ID]
   /admin risk owner [ID] [姓名]
   /admin risk add [type] [priority] [标题] | [描述]
+    type: risk|issue|blocker|dependency
 
 管理员 — 统一信息管理：
-  /admin fact list [type|dimension] [active|all]
+  /admin fact list [type] [active|all]
   /admin fact show [ID]
   /admin fact update [ID] [field] [值]
   /admin fact archive/delete [ID]
   /admin fact add [type] [标题] | [正文]
+  /admin fact decompose [ID]   AI 分解 risk 为待办列表
 
 管理员 — 预设假设（部门公认背景知识）：
   /admin assumption list [dept|project|client]
@@ -708,9 +889,10 @@ def _help_text() -> str:
 def _admin_help() -> str:
     return (
         "管理员命令：\n"
-        "/admin list/add/update/enable/disable/delete\n"
         "/admin risk list/close/reopen/owner/add\n"
         "/admin fact list/show/update/archive/delete/add\n"
+        "/admin fact decompose [ID]   AI 分解 risk 为待办\n"
         "/admin assumption list/show/add/update/archive/delete\n"
-        "/admin org list/add"
+        "/admin org list/add\n\n"
+        "所有人可用：/todo list/done/cancel/[新建内容]"
     )
