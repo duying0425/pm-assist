@@ -795,6 +795,21 @@ def card_action_skipped_response() -> dict:
     }
 
 
+async def get_user_name(open_id: str, app_id: str, app_secret: str) -> str:
+    """Fetch user display name from Feishu contact API by open_id."""
+    try:
+        token = await get_tenant_token(app_id, app_secret)
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{FEISHU_BASE}/contact/v3/users/{open_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"user_id_type": "open_id"},
+            )
+            return resp.json().get("data", {}).get("user", {}).get("name", "") or ""
+    except Exception:
+        return ""
+
+
 def _split(text: str, limit: int) -> list[str]:
     if len(text) <= limit:
         return [text]

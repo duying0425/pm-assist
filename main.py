@@ -818,6 +818,11 @@ async def _handle_message(event: dict):
         await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
+    if text == "/leave":
+        reply = _handle_leave(sender_open_id, user)
+        await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return
+
     # ── 未注册/待审批用户：仅允许 /register /join /help /version ──
     if user_role in ("unknown", "pending") or user_status not in ("active",):
         if user_status == "pending":
@@ -979,8 +984,12 @@ async def _handle_join(text: str, sender_open_id: str, user: dict) -> str:
     if user.get("status") == "pending":
         return "你已有一条待审批的申请，请等待管理员处理。"
 
-    # 获取发送者姓名（从 org_units 缓存或使用已知 name）
-    name = user.get("name", "") or sender_open_id[:8]
+    # 获取发送者姓名（从 org_units 缓存，或调飞书 API 查询，最后 fallback 到 open_id 前缀）
+    name = user.get("name", "")
+    if not name:
+        name = await feishu.get_user_name(sender_open_id, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    if not name:
+        name = sender_open_id[:8]
 
     # 写入 pending 状态
     db.upsert_user(sender_open_id, name=name, role=role_req,
@@ -999,6 +1008,23 @@ async def _handle_join(text: str, sender_open_id: str, user: dict) -> str:
     role_zh = _ROLE_ZH.get(role_req, role_req)
     return (f"✅ 申请已提交！\n角色：{role_zh}\n项目：{project_name}\n\n"
             "等待管理员审批，批准后会收到通知。")
+
+
+def _handle_leave(sender_open_id: str, user: dict) -> str:
+    """处理 /leave：用户退出当前项目绑定。"""
+    role = user.get("role", "unknown")
+    if role == "super_admin":
+        return "管理员无需退出项目，项目绑定不适用于管理员角色。"
+    if role == "unknown" or user.get("status") != "active":
+        return "你尚未加入任何项目，无需退出。"
+    project = user.get("project", "")
+    if not project:
+        return "你当前没有绑定任何项目。"
+    db.update_user(sender_open_id, project="", role="member")
+    name = user.get("name", sender_open_id[:8])
+    return (f"✅ 已退出项目「{project}」。\n"
+            f"角色已变更为普通成员，AI 对话仍可继续使用。\n"
+            f"如需加入新项目，发 /register 查看可用项目列表。")
 
 
 async def _extract_and_card(chat_id: str, text: str, project: str = "默认"):
@@ -1723,11 +1749,30 @@ def _handle_admin_user(args: list[str]) -> str:
         db.delete_user(open_id)
         return f"✓ 已删除用户 {user.get('name', open_id[:16])}"
 
+    if sub == "project" and len(args) >= 3:
+        open_id = args[1]
+        new_project = args[2]
+        user = db.get_user(open_id)
+        if not user:
+            return f"找不到用户 {open_id[:16]}…"
+        name = user.get("name", open_id[:16])
+        if new_project == "-":
+            db.update_user(open_id, project="")
+            return f"✓ 已清除 {name} 的项目绑定"
+        proj = db.get_project_by_name(new_project)
+        if not proj or not proj.get("active"):
+            projects = db.list_projects(active_only=True)
+            names = "、".join(p["name"] for p in projects) if projects else "（暂无）"
+            return f"找不到项目「{new_project}」，当前可用：{names}"
+        db.update_user(open_id, project=new_project)
+        return f"✓ 已将 {name} 的项目绑定改为「{new_project}」"
+
     return (
         "用户管理命令：\n"
         "/admin user list                           列出所有用户\n"
         "/admin user show [姓名/open_id]            查看用户详情\n"
         "/admin user role [open_id] [pm|member|super_admin]  修改角色\n"
+        "/admin user project [open_id] [项目名|-]   修改或清除项目绑定\n"
         "/admin user approve [open_id]              手动批准申请\n"
         "/admin user reject [open_id]               拒绝申请\n"
         "/admin user remove [open_id]               删除用户"
@@ -1864,6 +1909,7 @@ def _help_text(role: str = "unknown") -> str:
         "  @Bot [消息]              AI对话\n"
         "  /register                查看注册说明与可用项目\n"
         "  /join [项目] [pm|member] 申请加入项目\n"
+        "  /leave                   退出当前项目绑定\n"
         "  /clear                   清除当前会话历史\n"
         "  /version                 查看版本号\n"
         "  /help                    显示本说明\n"
@@ -1895,7 +1941,7 @@ def _help_text(role: str = "unknown") -> str:
     admin_section = (
         "\n管理员专用：\n"
         "  /admin stats                              系统统计\n"
-        "  /admin user list/show/role/approve/reject/remove\n"
+        "  /admin user list/show/role/project/approve/reject/remove\n"
         "  /admin project list/add/close/open/bind/unbind\n"
         "  /admin risk list/close/reopen/owner/add\n"
         "  /admin fact list/show/update/archive/delete/add/decompose\n"

@@ -36,9 +36,9 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `0.7.0`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `0.7.4`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
-- 每次部署前修改 `VERSION`，本地 `git tag v0.7.0 && git push --tags`，scp 时一并上传
+- 每次部署前修改 `VERSION`，本地 `git tag v0.7.4 && git push --tags`，scp 时一并上传
 
 ## 代码结构
 ```
@@ -327,6 +327,8 @@ key / value / updated_at
 29. **风险/待办清洗卡片确认**：洗盘报告中的风险关闭、信息归档、todo 完成/取消建议会生成飞书卡片，点击后执行（v0.7.1）
 30. **洗盘卡片类型标签**：清洗建议卡片每条显示 `[风险]`/`[里程碑]`/`[待办]` 等类型标签，不再靠 action label 猜条目类型（v0.7.3）
 31. **管理员命令各级提示完善**：`/admin fact` 不完整时提示中补充 `decompose` 子命令（v0.7.3）
+32. **注册审批卡片显示真实姓名**：调用飞书 contact API 查询申请人姓名，不再显示 open_id 前缀（v0.7.4）
+33. **项目绑定管理**：管理员可用 `/admin user project [open_id] [项目名|-]` 修改或清除用户项目绑定；用户可用 `/leave` 自助退出当前项目（v0.7.4）
 
 ## 命令速查
 
@@ -345,6 +347,7 @@ key / value / updated_at
 /note [内容]             快速记录笔记到知识库
 /version                 查看当前版本号
 /clear                   清除当前会话历史
+/leave                   退出当前项目绑定（角色降为 member，账号保留）
 /help                    显示使用说明
 ```
 
@@ -369,6 +372,15 @@ key / value / updated_at
 /admin fact delete [ID]                硬删除
 /admin fact add [type] [标题] | [正文] 新增
 /admin fact decompose [ID]             AI 分解 risk 为待办列表
+
+# 用户管理
+/admin user list                       列出所有用户
+/admin user show [姓名/open_id]        查看用户详情
+/admin user role [open_id] [pm|member|super_admin]  修改角色
+/admin user project [open_id] [项目名|-]  修改或清除项目绑定（- 表示清除）
+/admin user approve [open_id]          手动批准申请
+/admin user reject [open_id]           拒绝申请
+/admin user remove [open_id]           删除用户
 
 # AI 洗盘
 /admin review status                   查看当前洗盘模式
@@ -423,7 +435,7 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - Web 后台概览页可切换洗盘模式，但没有单独登录认证，仍按内部工具处理
 
 ## 服务器当前状态
-- v0.7.3 已部署（洗盘卡片类型标签 + 命令提示补全）
+- v0.7.4 已部署（注册审批卡片显示真实姓名 + /leave 命令 + /admin user project 命令）
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
 - todos/users/projects/system_settings 表由 `init_db()` 自动创建，无需手动迁移
