@@ -82,10 +82,17 @@ created_at / updated_at
 ### Layer 1：组织结构 `org_units` 表
 
 ```
-id / type（company|dept|team|role|client_org）/ name / parent_id / feishu_id / attributes(JSON)
+id          INTEGER PRIMARY KEY
+type        TEXT    -- company|dept|team|role|client_org
+name        TEXT
+parent_id   INTEGER -- 父节点 ID，NULL 表示根节点
+feishu_id   TEXT    -- 飞书 open_id 或 group_id（可选）
+attributes  TEXT    -- JSON，存储额外属性（如 lead、domain）
+active      INTEGER -- 1=启用, 0=停用
+created_at  TEXT
 ```
 
-已植入：东软睿驰 → 自动驾驶事业部 → 11 个团队 + 雅迪（client_org），共 15 条。
+已植入：东软睿驰（company）→ 自动驾驶事业部（dept）→ 11 个团队（team）+ 雅迪（client_org），共 14 条。
 
 ### Layer 2：项目事项 `facts` 表
 
@@ -118,9 +125,23 @@ created_at / updated_at
 **迁移说明**：`init_db()` 自动处理旧数据升级（添加 dimension 列并补填），幂等。服务器首次部署新版本后运行 `venv/bin/python migrate_v2.py` 完成数据迁移。
 
 ### 其他表
-- `conversations`：对话历史，按 chat_id 隔离
-- `pending_notes`：待确认笔记，TTL 10 分钟，items_json 含 action(new|update)/fact_id/saved_count
-- `processed_events`：事件去重
+
+**conversations**（对话历史）
+```
+id / chat_id / role（user|assistant）/ content / created_at
+```
+按 chat_id 隔离，`/clear` 命令清空当前 chat_id 的记录。
+
+**pending_notes**（待确认笔记，TTL 10 分钟）
+```
+chat_id（PRIMARY KEY）/ items_json / created_at（unix timestamp）
+```
+items_json 是数组，每项含：`type / content / action(new|update) / fact_id / fact_title / saved_count`
+
+**processed_events**（飞书事件去重）
+```
+event_id（PRIMARY KEY）/ created_at
+```
 
 ## 关键函数（db.py）
 
