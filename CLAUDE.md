@@ -44,7 +44,7 @@ pm-assist/
 ├── db.py            # SQLite CRUD：三层知识架构（assumptions/org_units/facts）
 ├── config.py        # 环境变量加载（从 .env 读取）
 ├── notify.py        # 消息推送：build_risk_section() + build_morning_report(review)
-├── migrate_v2.py    # 一次性迁移脚本（v2架构升级用，幂等，服务器上运行一次）
+├── migrate_v2.py    # 一次性迁移脚本（已执行，勿重复执行）
 ├── seed.py          # 初始知识库数据（已执行，勿重复执行）
 ├── seed_yadi.py     # 雅迪项目初始数据（已执行，勿重复执行）
 ├── deploy/
@@ -73,10 +73,11 @@ active      INTEGER -- 1=启用, 0=归档
 created_at / updated_at
 ```
 
-已植入 11 条种子假设（3 条铁律 + 6 条通常 + 2 条雅迪项目专属），覆盖：
+当前共 20 条（3 铁律 + 10 通常dept + 5 雅迪项目专属）：
 - PM角色边界、产品定位、ASPICE裁剪原则（铁律）
-- OEM决策周期、书面确认原则、外部依赖节奏、团队协作范式、实验室约束（通常）
-- 雅迪三方确认要求、雅迪项目定位（项目专属）
+- OEM决策周期、书面确认原则、外部依赖节奏、团队协作范式、硬件验证约束（通常）
+- 风险管理规则、Kickoff检查清单、需求变更管控规则、跨团队协作规则、问题处理分类流程（通常，从旧知识库迁入）
+- 雅迪三方确认要求、雅迪项目定位、BSP由华阳负责、团队角色分工、六大管理领域（项目专属）
 
 ### Layer 1：组织结构 `org_units` 表
 
@@ -240,22 +241,11 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - 飞书卡片回调响应 body 必须包含 `card.type="raw"` 和 `data` 包装层
 - APScheduler 的定时任务在服务重启后重新注册，若服务在 00:30 后重启，当天洗盘会跳过（次日才补跑）
 
-## 部署新版本（v2架构）步骤
-```bash
-# 1. 上传所有修改的文件到服务器
-# 2. 检查并删除可能存在的 notify.py crontab 条目
-crontab -l  # 查看，如有 notify.py 条目则 crontab -e 删除
-
-# 3. 运行一次性迁移（幂等，可重复运行）
-cd ~/pm-assist && venv/bin/python migrate_v2.py
-
-# 4. 重启服务
-kill $(pgrep -f uvicorn)
-nohup venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 >> logs/app.log 2>&1 &
-
-# 5. 验证
-tail -f logs/app.log
-```
+## 服务器当前状态（已完成）
+- v2架构已部署，服务运行中
+- migrate_v2.py 已执行（DB已迁移，勿重复运行）
+- notify.py 的 crontab 条目已删除（早报改由 APScheduler 统一发送）
+- 旧 process/knowledge 知识条目已迁移为 assumptions 并归档
 
 ## 待开发
 - [ ] 佟海鹏 open_id 添加到 .env ADMIN_OPEN_IDS（让他在飞书发一条消息看日志）
@@ -264,7 +254,7 @@ tail -f logs/app.log
 - [x] 三层知识架构：assumptions（预设假设）+ org_units（组织结构）+ facts（项目事项）
 - [x] 卡片逐条保存计数正确累加
 - [x] 早报双发问题修复（APScheduler 统一发送，停用 crontab）
+- [x] 旧 process/knowledge 条目审查并迁移为 assumptions
 - [ ] 项目上下文感知（群组绑定项目，自动注入项目信息）
 - [ ] 多项目支持
 - [ ] 知识库 Web 管理后台
-- [ ] 将现有 process/knowledge 类型 facts 人工审查后升级为 assumptions（migrate_v2.py 末尾有建议列表）
