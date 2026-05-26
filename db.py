@@ -46,7 +46,7 @@ _RISK_STATUS_OUT = {"active": "open", "resolved": "resolved", "archived": "archi
 ACTIONABLE_TYPES = {"risk", "issue", "blocker", "dependency", "milestone", "decision"}
 KNOWLEDGE_TYPES  = {"org", "process", "client", "knowledge", "team"}
 
-PENDING_TTL = 600
+PENDING_TTL = 1800
 
 _CONFIDENCE_LABEL = {"universal": "铁律", "common": "通常", "assumed": "推测"}
 _SCOPE_LABEL       = {"dept": "部门", "project": "项目", "client": "客户", "global": "全局"}

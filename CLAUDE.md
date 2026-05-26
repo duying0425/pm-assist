@@ -36,9 +36,9 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `0.7.6`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `0.7.7`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
-- 每次部署前修改 `VERSION`，本地 `git tag v0.7.6 && git push --tags`，scp 时一并上传
+- 每次部署前修改 `VERSION`，本地 `git tag vX.Y.Z && git push --tags`，scp 时一并上传
 
 ## 代码结构
 ```
@@ -170,11 +170,12 @@ id / chat_id / role（user|assistant）/ content / created_at
 ```
 按 chat_id 隔离，`/clear` 命令清空当前 chat_id 的记录。
 
-**pending_notes**（待确认笔记，TTL 10 分钟）
+**pending_notes**（待确认笔记，TTL 30 分钟）
 ```
 chat_id（PRIMARY KEY）/ items_json / created_at（unix timestamp）
 ```
 items_json 是数组，每项含：`type / content / action(new|update) / fact_id / fact_title / saved_count`
+同一张表（key 加前缀）存放四种 pending：知识库确认、todo 确认、洗盘合并建议、洗盘清洗建议；统一 TTL=1800s（`db.PENDING_TTL`）。
 
 **processed_events**（飞书事件去重）
 ```
@@ -257,13 +258,34 @@ key / value / updated_at
 
 ## 角色与权限系统（v0.6.0 新增）
 
-### 角色
-| 角色 | 来源 | 权限 |
-|------|------|------|
+### 角色概览
+| 角色 | 来源 | 权限概述 |
+|------|------|---------|
 | `super_admin` | .env `ADMIN_OPEN_IDS` 自动注册，或管理员手动提升 | 全部功能 + /admin 系列 + AI 数据查询 |
-| `pm` | 用户申请，管理员审批 | 当前 PM 工作模式（知识库、todo、AI 提取卡片） |
-| `member` | 用户申请，管理员审批 | 轻量 AI 对话（不注入 todos/risks，不触发提取卡片） |
+| `pm` | 用户申请，管理员审批 | 完整 PM 工作模式（风险/待办/知识库/AI 提取卡片） |
+| `member` | 用户申请，管理员审批 | 轻量 AI 对话（可查里程碑和组织信息；不注入 todos/risks，不触发提取卡片，不能使用 /risk /todo /note） |
 | `pending` | 已申请未审批 | 仅 /start /join /help /version |
+| `unknown` | 从未发过消息 | 同 pending |
+
+### 权限分级详表
+| 功能 | unknown/pending | member | pm | super_admin |
+|------|:-:|:-:|:-:|:-:|
+| /start /join /help /version | ✓ | ✓ | ✓ | ✓ |
+| @Bot AI 对话 | ✗ | ✓（轻量上下文） | ✓（完整上下文） | ✓（管理员上下文） |
+| /clear /leave | ✗ | ✓ | ✓ | ✓ |
+| /risk（查看/管理） | ✗ | ✗ | ✓ | ✓ |
+| /todo（查看/管理） | ✗ | ✗ | ✓ | ✓ |
+| /note | ✗ | ✗ | ✓ | ✓ |
+| AI 信息提取确认卡片 | ✗ | ✗ | ✓ | ✓ |
+| 快捷菜单-里程碑 | ✗ | ✓ | ✓ | ✓ |
+| 快捷菜单-待办/风险 | ✗ | ✗ | ✓ | ✓ |
+| /admin 系列 | ✗ | ✗ | ✗ | ✓ |
+| 快捷菜单-洗盘/用户 | ✗ | ✗ | ✗ | ✓ |
+
+**AI 上下文差异**（`claude_client.py`）：
+- `member`：仅注入角色定义 + 部门假设 + 里程碑/相关方（无 todos/risks/decisions）
+- `pm`：完整上下文（含 todos + risks + decisions + 里程碑）
+- `super_admin`：完整上下文 + 数据库结构说明
 
 ### 注册流程
 1. 用户发 `/start` 查看项目列表
@@ -334,43 +356,62 @@ key / value / updated_at
 36. **飞书机器人快捷菜单支持**：处理 `application.bot.menu_v6` 事件，支持查看待办/风险/里程碑、清除对话、AI 洗盘、用户列表等菜单操作（v0.7.6）
 37. **`/risk` 独立命令**：风险管理从 `/admin risk` 下放至根级 `/risk`，PM 和管理员均可使用；`/admin` 命令严格限管理员；`db.list_risks` 支持 `project=None` 全量查询（v0.7.6）
 38. **移除 `PRIMARY_ADMIN_OPEN_ID`**：审批卡片统一发给所有 `ADMIN_OPEN_IDS`，配置简化（v0.7.6）
+39. **`/risk show [ID]`**：PM 和管理员可查看风险完整正文及关联进行中待办（v0.7.7）
+40. **`/todo show [ID]` / `/todo update [ID] [字段] [值]`**：待办详情查看和字段更新（v0.7.7）
+41. **审批命令通知 + 幂等**：`/admin user approve/reject` 发送飞书通知；卡片审批加幂等检查，防止多管理员重复操作（v0.7.7）
+42. **member 权限收敛**：member 角色仅支持 @Bot 查询里程碑和组织信息 + 菜单里程碑查看；/risk、/todo、待办/风险菜单均不开放（v0.7.7）
+43. **pending_notes TTL 延长至 30 分钟**：合并建议/清洗建议卡片有充裕的确认窗口（v0.7.7）
+44. **帮助文本/命令帮助完整化**：按角色分区展示可用命令，`_admin_help()` 补齐全部子命令（v0.7.7）
 
 ## 命令速查
 
-### 所有用户
+### 所有人（含未注册）
 ```
-@Bot [消息]              AI 对话（结合知识库、风险、待办上下文）
-/todo list               查看进行中的待办
-/todo list all           查看全部待办（含已完成/已取消）
-/todo list risk [ID]     查看某风险关联的待办
-/todo list plan [ID]     查看某里程碑挂载的待办
-/todo [内容]              新建独立待办
-/todo [内容] risk [ID]   从 risk 分解新建待办
-/todo [内容] plan [ID]   挂到里程碑新建待办
-/todo done [ID]          标记待办完成
-/todo cancel [ID]        取消待办
-/start                   查看可用项目并申请加入（新用户入口）
+/start                     查看可用项目并申请加入（新用户入口）
 /join [项目名] [pm|member] 提交加入申请
-/note [内容]             快速记录笔记到知识库
-/version                 查看当前版本号
-/clear                   清除当前会话历史
-/leave                   退出当前项目绑定（角色降为 member，账号保留）
-/help                    显示使用说明
+/version                   查看当前版本号
+/help                      显示使用说明
+```
+
+### 已注册用户（member / pm / super_admin，status=active）
+```
+@Bot [消息]    AI 对话（深度按角色不同，见权限分级表）
+/clear         清除当前会话历史
+/leave         退出当前项目绑定（角色降为 member，账号保留）
 ```
 
 ### PM / 管理员可用
 ```
+/note [内容]   快速记录笔记到知识库
+
 # 风险管理
 /risk list [open|all]
+/risk show [ID]                                 完整正文 + 关联待办
 /risk close [ID]
 /risk reopen [ID]
 /risk owner [ID] [姓名]
 /risk add [type] [priority] [标题] | [描述]
   type: risk|issue|blocker|dependency  priority: high|medium|low
+
+# 待办事项
+/todo list                      查看进行中的待办
+/todo list all                  查看全部待办（含已完成/已取消）
+/todo list risk [ID]            查看某风险关联的待办
+/todo list plan [ID]            查看某里程碑挂载的待办
+/todo show [ID]                 查看待办详情（含关联风险/里程碑和备注正文）
+/todo [内容]                     新建独立待办
+/todo [内容] risk [ID]           从 risk 分解新建待办（保留追溯）
+/todo [内容] plan [ID]           挂到里程碑新建待办
+/todo update [ID] [字段] [值]    更新待办字段
+  字段：title|body|priority|owner|due_date  priority: high|medium|low
+/todo done [ID]                 标记待办完成
+/todo cancel [ID]               取消待办
 ```
 
 ### 管理员专用
 ```
+/admin stats
+
 # 统一信息管理
 /admin fact list                       列出所有 active 条目
 /admin fact list risk                  按 type 过滤
@@ -382,16 +423,25 @@ key / value / updated_at
 /admin fact archive [ID]               归档（软删除）
 /admin fact delete [ID]                硬删除
 /admin fact add [type] [标题] | [正文] 新增
-/admin fact decompose [ID]             AI 分解 risk 为待办列表
+/admin fact decompose [ID]             AI 分解 risk 为待办列表（卡片确认后入库）
 
 # 用户管理
-/admin user list                       列出所有用户
-/admin user show [姓名/open_id]        查看用户详情
+/admin user list                           列出所有用户
+/admin user show [姓名/open_id]            查看用户详情
 /admin user role [open_id] [pm|member|super_admin]  修改角色
-/admin user project [open_id] [项目名|-]  修改或清除项目绑定（- 表示清除）
-/admin user approve [open_id]          手动批准申请
-/admin user reject [open_id]           拒绝申请
-/admin user remove [open_id]           删除用户
+/admin user project [open_id] [项目名|-]   修改或清除项目绑定（- 表示清除）
+/admin user approve [open_id]              手动批准申请（含飞书通知，幂等）
+/admin user reject [open_id]              拒绝申请（含飞书通知，幂等）
+/admin user remove [open_id]              删除用户
+
+# 项目管理
+/admin project list                  列出所有项目
+/admin project add [名称] | [描述]   创建项目
+/admin project close [ID]            关闭项目
+/admin project open [ID]             重新开启
+/admin project bind [项目名]         将当前群聊绑定到项目
+/admin project unbind                解除当前群聊绑定
+/admin project bindings              查看所有群聊绑定
 
 # AI 洗盘
 /admin review status                   查看当前洗盘模式
@@ -409,14 +459,15 @@ key / value / updated_at
   confidence: universal（铁律）|common（通常）|assumed（推测）
 /admin assumption update [ID] [field] [值]
 /admin assumption archive [ID]
-
-命令解析约定：`fact add`、`fact update`、`assumption add`、`assumption update`、`project add/bind`、`risk add` 等长文本参数由各子命令 handler 自行拼接，不受顶层 `split(None, 4)` 截断影响；带 `|` 时左侧为标题/名称，右侧为正文/描述。没有 `|` 时，add 类命令通常会把同一段文本同时作为标题和正文。
+/admin assumption delete [ID]
 
 # 组织结构管理
 /admin org list [type?]
 /admin org add [type] [名称] [父节点ID?]
   type: company|dept|team|role|client_org
 ```
+
+**命令解析约定**：`fact add`、`fact update`、`assumption add`、`risk add` 等长文本参数由各子命令 handler 自行拼接，不受顶层 `split(None, 4)` 截断影响；带 `|` 时左侧为标题/名称，右侧为正文/描述。没有 `|` 时，add 类命令通常把同一段文本同时作为标题和正文。
 
 ## 权限与推送管理
 无独立用户表，通过 `.env` 配置：
@@ -433,9 +484,25 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 
 ## 飞书应用配置要点
 - 事件订阅：`im.message.receive_v1` + `card.action.trigger` + `application.bot.menu_v6`（三个都必须订阅）
-- 快捷菜单：在飞书开放平台 → 应用能力 → 机器人 → 快捷菜单 中配置，event_key 与代码中 `_handle_bot_menu` 的 if 判断对应
+- 快捷菜单：在飞书开放平台 → 应用能力 → 机器人 → 快捷菜单 中配置，event_key 须与下表完全一致
 - 回调地址：`https://pm.tmhcorps.cn/webhook/feishu`
 - 卡片回调响应格式：`{"toast":..., "card":{"type":"raw","data":{...}}}`（缺少此格式会报错200672）
+
+### 快捷菜单事件键（application.bot.menu_v6）
+由 `_handle_bot_menu` 处理，event_key 必须与飞书后台配置完全一致。
+
+| event_key | 建议菜单名 | 最低权限 | 功能说明 |
+|-----------|-----------|---------|---------|
+| `show_help` | 使用帮助 | 全员（含未注册） | 展示 /help 内容（按角色显示不同版本） |
+| `show_version` | 查看版本 | 全员（含未注册） | 显示当前运行版本号 |
+| `clear_chat` | 清除对话 | active 已注册用户 | 清除当前对话历史及 pending 确认项 |
+| `view_schedule` | 查看里程碑 | member / pm / super_admin | 列出当前项目 active 里程碑 |
+| `view_todos` | 查看待办 | pm / super_admin | 列出进行中待办（按项目过滤） |
+| `view_risks` | 查看风险 | pm / super_admin | 列出 open 风险/问题（按项目过滤） |
+| `run_review` | AI 洗盘 | super_admin | 立即执行洗盘（按当前模式），完成后推送报告 |
+| `admin_users` | 用户列表 | super_admin | 列出所有注册用户 |
+
+> 注意：快捷菜单事件无 chat_id，`view_*` 使用发起人的 open_id 作为 chat_id，项目按用户绑定解析（super_admin 无项目绑定时查全量）。
 
 ## 已知坑
 - SSH 登录用 `duyingfang` 而非 `root`
@@ -447,6 +514,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 
 ## 服务器当前状态
 - v0.7.6 已部署（飞书快捷菜单 + /risk 独立命令 + 移除 PRIMARY_ADMIN_OPEN_ID）
+- v0.7.7 已部署（/risk show + /todo show/update + approve/reject 通知幂等 + member 权限收敛 + TTL 延长至30分钟 + 帮助文本完整化）
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
 - todos/users/projects/system_settings 表由 `init_db()` 自动创建，无需手动迁移
