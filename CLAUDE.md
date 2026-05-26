@@ -33,6 +33,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 用 nohup 运行，不用 systemd（账号无 NOPASSWD sudo）。
 - 重启：先 `ps aux | grep uvicorn` 找 PID，`kill PID`，再执行启动命令
 - 重启后需手动启动（无开机自动恢复）
+- 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 代码结构
 ```
@@ -40,9 +41,10 @@ pm-assist/
 ├── main.py          # FastAPI 主入口，Webhook 处理，管理员命令，卡片回调
 ├── claude_client.py # AI 对话(chat) + 关键信息提取(extract_facts) + 夜间洗盘(nightly_review)
 ├── feishu.py        # 飞书 API：发文本、发交互卡片、卡片响应格式
-├── db.py            # SQLite CRUD：facts 表 + 所有业务逻辑
+├── db.py            # SQLite CRUD：三层知识架构（assumptions/org_units/facts）
 ├── config.py        # 环境变量加载（从 .env 读取）
 ├── notify.py        # 消息推送：build_risk_section() + build_morning_report(review)
+├── migrate_v2.py    # 一次性迁移脚本（v2架构升级用，幂等，服务器上运行一次）
 ├── seed.py          # 初始知识库数据（已执行，勿重复执行）
 ├── seed_yadi.py     # 雅迪项目初始数据（已执行，勿重复执行）
 ├── deploy/
@@ -53,84 +55,165 @@ pm-assist/
 └── logs/app.log     # 运行日志（服务器上）
 ```
 
-## 数据库（SQLite: pm_assist.db，在服务器上）
+## 知识架构（三层）
 
-### 核心表：facts（统一信息表，替代原 knowledge_blocks + risks）
+### Layer 0：预设假设 `assumptions` 表
+
+部门公认的背景知识，每次 AI 对话**自动注入**，无需用户提及。
 
 ```
 id          INTEGER PRIMARY KEY
-type        TEXT    -- risk|issue|blocker|dependency|milestone|decision|team|client|knowledge|process|org
+scope       TEXT    -- global|dept|project|client
+scope_ref   TEXT    -- 当 scope=project/client 时填项目名或客户名
 title       TEXT
-body        TEXT    -- 正文；AI追加更新时末尾追加"[日期 更新] 内容"保留历史
-status      TEXT    -- active（默认）| resolved | archived
-priority    TEXT    -- high|medium|low（风险类用）
-owner       TEXT    -- 负责人
-due_date    TEXT    -- 截止日期
-project     TEXT    -- 默认 yadi
-source      TEXT    -- seed|manual|ai（信息来源）
-created_at  TEXT    -- 本地时间，自动生成
-updated_at  TEXT    -- 本地时间，每次更新自动刷新
+body        TEXT
+confidence  TEXT    -- universal（铁律）| common（通常）| assumed（推测）
+source      TEXT    -- seed|manual
+active      INTEGER -- 1=启用, 0=归档
+created_at / updated_at
 ```
 
-**type 语义**：
-- `risk / issue / blocker / dependency`：可追踪的项目风险与问题（进风险清单）
-- `milestone / decision`：可追踪的里程碑与决策（进风险清单）
-- `org / process / client / knowledge / team`：参考知识（进知识库）
-- `report`：系统内部类型，凌晨 AI 洗盘结果（project=system），不出现在 list/AI上下文中
+已植入 11 条种子假设（3 条铁律 + 6 条通常 + 2 条雅迪项目专属），覆盖：
+- PM角色边界、产品定位、ASPICE裁剪原则（铁律）
+- OEM决策周期、书面确认原则、外部依赖节奏、团队协作范式、实验室约束（通常）
+- 雅迪三方确认要求、雅迪项目定位（项目专属）
 
-**迁移说明**：首次 `init_db()` 自动将旧 `knowledge_blocks` + `risks` 迁移到 `facts`，幂等，旧表保留。
+### Layer 1：组织结构 `org_units` 表
+
+```
+id / type（company|dept|team|role|client_org）/ name / parent_id / feishu_id / attributes(JSON)
+```
+
+已植入：东软睿驰 → 自动驾驶事业部 → 11 个团队 + 雅迪（client_org），共 15 条。
+
+### Layer 2：项目事项 `facts` 表
+
+```
+id          INTEGER PRIMARY KEY
+type        TEXT    -- 子类型（见下）
+dimension   TEXT    -- 一级维度（自动从 type 计算）
+title       TEXT
+body        TEXT    -- AI追加更新时末尾追加"[日期 更新] 内容"保留历史
+status      TEXT    -- active（默认）| resolved | archived
+priority    TEXT    -- high|medium|low
+owner       TEXT
+due_date    TEXT
+project     TEXT    -- 默认 yadi
+source      TEXT    -- seed|manual|ai
+created_at / updated_at
+```
+
+**type → dimension 映射**：
+| type | dimension |
+|------|-----------|
+| risk / issue / blocker / dependency | risk |
+| milestone | schedule |
+| decision / process | decision |
+| team | resource |
+| client / org | stakeholder |
+| knowledge | scope |
+| report | system（内部，不对外展示） |
+
+**迁移说明**：`init_db()` 自动处理旧数据升级（添加 dimension 列并补填），幂等。服务器首次部署新版本后运行 `venv/bin/python migrate_v2.py` 完成数据迁移。
 
 ### 其他表
-- `conversations`：对话历史，按 chat_id 隔离，字段 chat_id/role/content/created_at
-- `pending_notes`：待确认笔记，TTL 10 分钟，items_json 含 action(new|update)/fact_id
+- `conversations`：对话历史，按 chat_id 隔离
+- `pending_notes`：待确认笔记，TTL 10 分钟，items_json 含 action(new|update)/fact_id/saved_count
 - `processed_events`：事件去重
 
 ## 关键函数（db.py）
-- `add_fact(type_, title, body, ...)` → 新增任意类型条目
-- `update_fact(id, **kwargs)` → 更新任意字段（status/owner/priority/due_date/title/body）
-- `append_to_fact(id, addition)` → 在 body 末尾追加带时间戳的更新（保留历史）
-- `find_similar_fact(type_, content)` → 关键词重叠匹配，用于 AI 提取时去重
-- `get_knowledge_text()` → 拼装非风险类 active 条目给 AI（知识库部分，已排除 report）
-- `get_risks_text()` → 拼装 risk/issue/blocker/dependency active 条目给 AI
-- `list_facts(type_, status, project)` → 按条件列出条目（自动排除 report 系统类型）
-- `pop_pending_item(chat_id, index)` → 弹出单条待确认项
-- `save_nightly_review(content)` → 存入 AI 洗盘报告（type=report, project=system）
-- `get_latest_nightly_review()` → 取最新洗盘报告正文
-- `get_all_facts_for_review()` → 返回所有 active 非 report 条目摘要，供 AI 洗盘分析
+
+**三层上下文**：
+- `get_full_context(project)` → 返回结构化 dict，供 AI 按优先级注入（替代旧的 get_knowledge_text + get_risks_text）
+  - `dept_assumptions`：部门铁律/通识
+  - `project_assumptions`：项目专属假设
+  - `risks`：活跃风险与问题
+  - `schedule`：里程碑与节点
+  - `decisions`：决策记录
+  - `references`：相关方与参考信息
+
+**facts CRUD**：
+- `add_fact(type_, title, body, ...)` → 新增（自动计算 dimension）
+- `update_fact(id, **kwargs)` → 更新任意字段
+- `append_to_fact(id, addition)` → body 末尾追加带时间戳更新
+- `find_similar_fact(type_, content)` → 关键词重叠去重
+- `list_facts(type_, dimension, status, project)` → 支持按 type 或 dimension 过滤
+
+**assumptions CRUD**：
+- `add_assumption(title, body, scope, scope_ref, confidence)` → 新增预设
+- `update_assumption(id, **kwargs)` → 更新
+- `list_assumptions(scope, scope_ref, active_only)` → 列出
+
+**org_units CRUD**：
+- `add_org_unit(type_, name, parent_id)` → 新增组织单元
+- `list_org_units(type_)` → 列出
+
+**洗盘相关**：
+- `save_nightly_review(content)` → 存入 AI 洗盘报告
+- `get_latest_nightly_review()` → 取最新洗盘报告
+- `get_all_facts_for_review()` → 所有 active 非 report 条目，供 AI 分析
+
+## AI 上下文注入顺序（claude_client.py）
+
+```
+[静态] 角色定义（PM助手职责）
+[L0]   部门预设假设（铁律/通识，scope=dept/global）
+[L1]   项目专属假设（scope=project）
+[L2]   活跃风险与问题（dimension=risk）
+[L3]   里程碑与计划（dimension=schedule）
+[L4]   决策记录（dimension=decision）
+[L5]   相关方与参考（dimension=stakeholder/resource/scope）
+```
 
 ## 已实现功能
-1. **飞书 Bot 对话**：@Bot 发消息，结合知识库+风险清单+对话历史用 AI 回答
+1. **飞书 Bot 对话**：@Bot 发消息，结合三层知识上下文 + 对话历史用 AI 回答
 2. **知识库管理**：`/admin list/add/update/enable/disable/delete`（兼容旧接口）
 3. **风险管理**：`/admin risk list/close/reopen/owner/add`
-4. **统一信息管理**：`/admin fact list/show/update/archive/delete/add`（新接口）
-5. **快速记录**：`/note [内容]` 直接存入知识库
-6. **AI 智能提取**：用户发消息后台自动提取，每个独立事项单独一条（不合并）
-7. **相似性去重**：提取时匹配已有条目，卡片上区分"新增"和"追加 #ID"两种操作
-8. **交互卡片确认**：逐条确认，支持"全部保存"/"跳过"
-9. **对话历史清除**：`/clear` 命令
-10. **定时 AI 洗盘 + 早报推送**：凌晨 00:30 AI 分析所有 active facts 给出清洗建议并存 DB；09:00 向 PRIMARY_ADMIN_OPEN_ID 推送风险日报 + AI 决策报告合并版（APScheduler 内置于 FastAPI）
+4. **统一信息管理**：`/admin fact list/show/update/archive/delete/add`
+5. **预设假设管理**：`/admin assumption list/show/add/update/archive/delete`
+6. **组织结构管理**：`/admin org list/add`
+7. **快速记录**：`/note [内容]` 直接存入知识库
+8. **AI 智能提取**：用户发消息后台自动提取，每个独立事项单独一条
+9. **相似性去重**：提取时匹配已有条目，卡片上区分"新增"和"追加 #ID"
+10. **交互卡片确认**：逐条确认，支持"全部保存"/"跳过"；卡片标题动态显示进度（已保存N条/还剩M条）；最终计数正确累加
+11. **对话历史清除**：`/clear` 命令
+12. **定时 AI 洗盘 + 早报推送**：凌晨 00:30 洗盘存 DB；09:00 推送给 ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS（APScheduler 内置）
 
 ## 管理员命令速查
 ```
-# 查看所有风险（active=open）
-/admin risk list
-/admin risk list all
+# 风险管理
+/admin risk list [open|all]
+/admin risk close/reopen [ID]
+/admin risk owner [ID] [姓名]
+/admin risk add [type] [priority] [标题] | [描述]
+  type: risk|issue|blocker|dependency  priority: high|medium|low
 
-# 关闭/重开/设负责人
-/admin risk close 3
-/admin risk owner 3 张工
-/admin risk add issue high 测试环境未搭建 | 具体描述
-
-# 统一信息管理（更强）
-/admin fact list                    # 列出所有 active 条目
-/admin fact list risk               # 只看风险类
-/admin fact list all                # 含 archived/resolved
-/admin fact show 5                  # 看完整正文（含历史更新记录）
+# 统一信息管理
+/admin fact list                       # 列出所有 active 条目
+/admin fact list risk                  # 按 type 过滤
+/admin fact list all                   # 含 archived/resolved
+/admin fact show 5                     # 完整正文（含历史更新）
 /admin fact update 5 status resolved
 /admin fact update 5 owner 李工
-/admin fact archive 5               # 归档（软删除）
-/admin fact delete 5                # 硬删除
+/admin fact archive 5                  # 归档（软删除）
+/admin fact delete 5                   # 硬删除
 /admin fact add milestone 5月底完成集成测试 | 详细说明
+
+# 预设假设管理（部门公认背景知识）
+/admin assumption list                 # 所有假设
+/admin assumption list dept            # 只看部门级
+/admin assumption list project         # 只看项目级
+/admin assumption show 3
+/admin assumption add dept universal PM角色边界 | PM不直接管人...
+/admin assumption add project/yadi common 雅迪变更确认 | 需三方书面确认
+  scope: dept|project/项目名|client|global
+  confidence: universal（铁律）|common（通常）|assumed（推测）
+/admin assumption update 3 body 更新后的内容
+/admin assumption archive 3
+
+# 组织结构管理
+/admin org list
+/admin org add team 新团队名称 [父节点ID]
 ```
 
 ## 权限与推送管理
@@ -138,12 +221,12 @@ updated_at  TEXT    -- 本地时间，每次更新自动刷新
 ```
 ADMIN_OPEN_IDS=ou_d1ccad1071d7daf767337953ffeb317a,ou_佟海鹏的open_id
 NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
+PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 ```
 - `ADMIN_OPEN_IDS`：有权使用 `/admin` 命令
-- `PRIMARY_ADMIN_OPEN_ID`：APScheduler 早报唯一接收人（杜莹芳），默认取 ADMIN_OPEN_IDS 首个，建议显式配置
 - `NOTIFY_OPEN_IDS`：只收日报，无管理权限
-- notify.py 独立脚本发送目标 = `ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS` 并集（crontab 版）
-- APScheduler 早报只发给 `PRIMARY_ADMIN_OPEN_ID`
+- APScheduler 早报发送给 `ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS` 全量
+- **不要同时启用 crontab 跑 notify.py**，否则主管理员收到两份
 - 获取 open_id：让对方发一条消息，从 `logs/app.log` 找 `sender=ou_xxx`
 
 ## 飞书应用配置要点
@@ -155,11 +238,33 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - SSH 登录用 `duyingfang` 而非 `root`
 - `aliyun.tmhcorps.cn` DNS 须设为"仅DNS"（灰云），否则 SSH 被 Cloudflare 拦截
 - 飞书卡片回调响应 body 必须包含 `card.type="raw"` 和 `data` 包装层
+- APScheduler 的定时任务在服务重启后重新注册，若服务在 00:30 后重启，当天洗盘会跳过（次日才补跑）
+
+## 部署新版本（v2架构）步骤
+```bash
+# 1. 上传所有修改的文件到服务器
+# 2. 检查并删除可能存在的 notify.py crontab 条目
+crontab -l  # 查看，如有 notify.py 条目则 crontab -e 删除
+
+# 3. 运行一次性迁移（幂等，可重复运行）
+cd ~/pm-assist && venv/bin/python migrate_v2.py
+
+# 4. 重启服务
+kill $(pgrep -f uvicorn)
+nohup venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 >> logs/app.log 2>&1 &
+
+# 5. 验证
+tail -f logs/app.log
+```
 
 ## 待开发
 - [ ] 佟海鹏 open_id 添加到 .env ADMIN_OPEN_IDS（让他在飞书发一条消息看日志）
 - [ ] systemd 自动重启（当前重启服务器后需手动拉起）
 - [x] 定时任务：凌晨 AI 洗盘（00:30）+ 早报推送（09:00），APScheduler 内置于 FastAPI
+- [x] 三层知识架构：assumptions（预设假设）+ org_units（组织结构）+ facts（项目事项）
+- [x] 卡片逐条保存计数正确累加
+- [x] 早报双发问题修复（APScheduler 统一发送，停用 crontab）
 - [ ] 项目上下文感知（群组绑定项目，自动注入项目信息）
 - [ ] 多项目支持
 - [ ] 知识库 Web 管理后台
+- [ ] 将现有 process/knowledge 类型 facts 人工审查后升级为 assumptions（migrate_v2.py 末尾有建议列表）

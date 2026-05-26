@@ -74,7 +74,7 @@ async def send_confirm_card(chat_id: str, items: list[dict], app_id: str, app_se
         )
 
 
-def _build_confirm_card(items: list[dict], chat_id: str) -> dict:
+def _build_confirm_card(items: list[dict], chat_id: str, saved_count: int = 0) -> dict:
     has_update = any(item.get("action") == "update" for item in items)
     elements = []
     for i, item in enumerate(items[:10]):
@@ -119,13 +119,24 @@ def _build_confirm_card(items: list[dict], chat_id: str) -> dict:
                         "tag": "button",
                         "text": {"tag": "plain_text", "content": btn_text},
                         "type": btn_type,
-                        "value": {"action": "save_one", "chat_id": chat_id, "index": i},
+                        "value": {
+                            "action": "save_one",
+                            "chat_id": chat_id,
+                            "index": i,
+                            "saved_count": saved_count,
+                        },
                     }],
                 },
             ],
         })
 
-    title_text = "💡 发现可更新/记录信息" if has_update else "💡 发现可记录信息"
+    if saved_count > 0:
+        title_text = f"💡 已保存 {saved_count} 条，还剩 {len(items)} 条"
+        header_color = "green"
+    else:
+        title_text = "💡 发现可更新/记录信息" if has_update else "💡 发现可记录信息"
+        header_color = "blue"
+
     elements.extend([
         {"tag": "hr"},
         {
@@ -135,7 +146,7 @@ def _build_confirm_card(items: list[dict], chat_id: str) -> dict:
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "✓ 全部保存"},
                     "type": "primary",
-                    "value": {"action": "save_all", "chat_id": chat_id},
+                    "value": {"action": "save_all", "chat_id": chat_id, "saved_count": saved_count},
                 },
                 {
                     "tag": "button",
@@ -150,7 +161,7 @@ def _build_confirm_card(items: list[dict], chat_id: str) -> dict:
         "config": {"wide_screen_mode": True, "enable_forward": False},
         "header": {
             "title": {"tag": "plain_text", "content": title_text},
-            "template": "blue",
+            "template": header_color,
         },
         "elements": elements,
     }
@@ -173,11 +184,12 @@ def card_saved_response(count: int) -> dict:
     }
 
 
-def card_one_saved_response(saved: dict, remaining: list[dict], chat_id: str) -> dict:
+def card_one_saved_response(saved: dict, remaining: list[dict], chat_id: str,
+                             saved_count: int = 1) -> dict:
     label = _TYPE_LABELS.get(saved["type"], saved["type"])
     action = saved.get("action", "new")
     verb = f"已追加到 #{saved.get('fact_id')}" if action == "update" else "已新增"
-    updated = _build_confirm_card(remaining, chat_id)
+    updated = _build_confirm_card(remaining, chat_id, saved_count)
     return {
         "toast": {"type": "success", "content": f"{verb}：[{label}]"},
         "card": {"type": "raw", "data": updated},

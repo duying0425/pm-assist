@@ -8,11 +8,8 @@ _client = AsyncOpenAI(
     base_url=OPENROUTER_BASE_URL,
 )
 
-BASE_SYSTEM = """你是东软睿驰自动驾驶团队的内部PM助手，专门帮助PM（尤其是新人PM）处理日常项目管理工作。
-
-你了解的团队包括：领导组、售前团队、架构师团队、PM团队、产品设计与定义团队、感知团队、规划控制团队、基础软件开发团队、测试团队、传感器评价与管理团队、环境实施团队，以及公司内其他团队（总包/二级供应商）。
-
-项目背景：定点后智驾解决方案开发，非平台类产品，整体遵循ASPICE流程精神但按成本灵活裁剪。
+# 静态角色定义（团队知识和项目背景改为从DB动态注入）
+_ROLE = """你是东软睿驰自动驾驶团队的内部PM助手，专门帮助PM（尤其是新人PM）处理日常项目管理工作。
 
 你的职责：
 - 指导PM如何协调各团队、推进项目节点
@@ -22,29 +19,39 @@ BASE_SYSTEM = """你是东软睿驰自动驾驶团队的内部PM助手，专门�
 - 解答公司流程和规范相关问题
 - 帮助新人PM避免内耗和常见失误
 
-回答风格：
-- 简洁实用，直接给可操作建议，不泛泛而谈
-- 需要多步骤时给清单格式
-- 判断该找谁时明确说人/团队名称
-- 遇到超出知识范围的情况，说明需要找哪个角色确认
+回答风格：简洁实用，直接给可操作建议；多步骤时给清单；判断该找谁时明确说人/团队名称。"""
 
----
-以下是公司内部知识库（由管理员维护）：
+_CONTEXT_TEMPLATE = """{role}
 
-{knowledge}
-
----
-以下是当前项目已登记的风险与问题（未关闭）：
-
-{risks}
-"""
+{dept_section}{project_section}{risk_section}{schedule_section}{decision_section}{ref_section}"""
 
 
-async def chat(history: list[dict], knowledge: str, risks: str = "") -> str:
-    knowledge_section = knowledge if knowledge else "（知识库暂未配置，将基于通用PM知识回答）"
-    risks_section = risks if risks else "（暂无已登记风险）"
-    system = BASE_SYSTEM.format(knowledge=knowledge_section, risks=risks_section)
+def _build_system(context: dict) -> str:
+    def section(title: str, content: str) -> str:
+        if not content:
+            return ""
+        return f"\n---\n## {title}\n{content}\n"
 
+    dept_section     = section("部门预设（团队公认背景知识）", context.get("dept_assumptions", ""))
+    project_section  = section("当前项目背景", context.get("project_assumptions", ""))
+    risk_section     = section("当前活跃风险与问题", context.get("risks") or "（暂无已登记风险）")
+    schedule_section = section("里程碑与计划节点", context.get("schedule", ""))
+    decision_section = section("关键决策记录", context.get("decisions", ""))
+    ref_section      = section("相关方与参考信息", context.get("references", ""))
+
+    return _CONTEXT_TEMPLATE.format(
+        role=_ROLE,
+        dept_section=dept_section,
+        project_section=project_section,
+        risk_section=risk_section,
+        schedule_section=schedule_section,
+        decision_section=decision_section,
+        ref_section=ref_section,
+    )
+
+
+async def chat(history: list[dict], context: dict) -> str:
+    system = _build_system(context)
     response = await _client.chat.completions.create(
         model=AI_MODEL,
         max_tokens=4000,

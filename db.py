@@ -7,14 +7,29 @@ import time as _time
 
 DB_PATH = "pm_assist.db"
 
-# --- Migration mappings ---
+# sub_type → dimension mapping (universal PM taxonomy)
+TYPE_TO_DIMENSION = {
+    "risk":        "risk",
+    "issue":       "risk",
+    "blocker":     "risk",
+    "dependency":  "risk",
+    "milestone":   "schedule",
+    "decision":    "decision",
+    "process":     "decision",
+    "team":        "resource",
+    "client":      "stakeholder",
+    "org":         "stakeholder",
+    "knowledge":   "scope",
+    "report":      "system",
+}
+
 _CATEGORY_TYPE_MAP = {
     "org": "org",
     "process": "process",
     "项目框架": "process",
     "工作流程": "process",
     "customer": "client",
-    "risk": "knowledge",   # 风险管理规则是知识内容，不是风险条目
+    "risk": "knowledge",
 }
 _NOTE_PREFIX_TYPE = {
     "[风险]": "risk",
@@ -23,13 +38,16 @@ _NOTE_PREFIX_TYPE = {
     "[人员]": "team",
     "[客户信息]": "client",
 }
-_RISK_STATUS_IN = {"open": "active", "closed": "resolved", "resolved": "resolved"}
+_RISK_STATUS_IN  = {"open": "active", "closed": "resolved", "resolved": "resolved"}
 _RISK_STATUS_OUT = {"active": "open", "resolved": "resolved", "archived": "archived"}
 
 ACTIONABLE_TYPES = {"risk", "issue", "blocker", "dependency", "milestone", "decision"}
-KNOWLEDGE_TYPES = {"org", "process", "client", "knowledge", "team"}
+KNOWLEDGE_TYPES  = {"org", "process", "client", "knowledge", "team"}
 
 PENDING_TTL = 600
+
+_CONFIDENCE_LABEL = {"universal": "铁律", "common": "通常", "assumed": "推测"}
+_SCOPE_LABEL       = {"dept": "部门", "project": "项目", "client": "客户", "global": "全局"}
 
 
 def get_conn():
@@ -44,6 +62,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS facts (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 type        TEXT    NOT NULL,
+                dimension   TEXT    NOT NULL DEFAULT '',
                 title       TEXT    NOT NULL,
                 body        TEXT    NOT NULL,
                 status      TEXT    NOT NULL DEFAULT 'active',
@@ -54,6 +73,28 @@ def init_db():
                 source      TEXT    NOT NULL DEFAULT 'manual',
                 created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
                 updated_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE IF NOT EXISTS assumptions (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope       TEXT    NOT NULL DEFAULT 'dept',
+                scope_ref   TEXT    NOT NULL DEFAULT '',
+                title       TEXT    NOT NULL,
+                body        TEXT    NOT NULL,
+                confidence  TEXT    NOT NULL DEFAULT 'common',
+                source      TEXT    NOT NULL DEFAULT 'manual',
+                active      INTEGER NOT NULL DEFAULT 1,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE IF NOT EXISTS org_units (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                type        TEXT    NOT NULL,
+                name        TEXT    NOT NULL,
+                parent_id   INTEGER DEFAULT NULL,
+                feishu_id   TEXT    NOT NULL DEFAULT '',
+                attributes  TEXT    NOT NULL DEFAULT '{}',
+                active      INTEGER NOT NULL DEFAULT 1,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
             );
             CREATE TABLE IF NOT EXISTS conversations (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,14 +113,19 @@ def init_db():
                 created_at  INTEGER NOT NULL
             );
         """)
+        # upgrade: add dimension column if coming from old schema
+        try:
+            conn.execute("ALTER TABLE facts ADD COLUMN dimension TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
         _migrate_legacy(conn)
+        _migrate_dimension(conn)
 
 
 def _migrate_legacy(conn):
     """从 knowledge_blocks + risks 一次性迁移到 facts，幂等。"""
     if conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0] > 0:
         return
-
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     has_kb = conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='knowledge_blocks'"
@@ -87,7 +133,6 @@ def _migrate_legacy(conn):
     has_risks = conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='risks'"
     ).fetchone()[0]
-
     if has_kb:
         for r in conn.execute("SELECT * FROM knowledge_blocks").fetchall():
             cat = r["category"]
@@ -109,7 +154,6 @@ def _migrate_legacy(conn):
                 " VALUES(?,?,?,?,?,?,?)",
                 (fact_type, r["title"], r["content"], status, source, ts, ts),
             )
-
     if has_risks:
         for r in conn.execute("SELECT * FROM risks").fetchall():
             status = _RISK_STATUS_IN.get(r["status"], "active")
@@ -123,6 +167,15 @@ def _migrate_legacy(conn):
                     "seed", r["created_at"] or now, r["updated_at"] or now,
                 ),
             )
+
+
+def _migrate_dimension(conn):
+    """为已有 facts 补填 dimension 字段，幂等。"""
+    for type_, dim in TYPE_TO_DIMENSION.items():
+        conn.execute(
+            "UPDATE facts SET dimension=? WHERE type=? AND (dimension IS NULL OR dimension='')",
+            (dim, type_),
+        )
 
 
 # ── 事件去重 ───────────────────────────────────────────────
@@ -170,11 +223,12 @@ def clear_history(chat_id: str):
 def add_fact(type_: str, title: str, body: str, status: str = "active",
              priority: str = "", owner: str = "", due_date: str = "",
              project: str = "yadi", source: str = "manual") -> int:
+    dimension = TYPE_TO_DIMENSION.get(type_, "scope")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO facts(type,title,body,status,priority,owner,due_date,project,source)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
-            (type_, title, body, status, priority, owner, due_date, project, source),
+            "INSERT INTO facts(type,dimension,title,body,status,priority,owner,due_date,project,source)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (type_, dimension, title, body, status, priority, owner, due_date, project, source),
         )
         return cur.lastrowid
 
@@ -186,8 +240,10 @@ def get_fact(fact_id: int) -> dict | None:
 
 
 def update_fact(fact_id: int, **kwargs):
-    allowed = {"type", "title", "body", "status", "priority", "owner", "due_date"}
+    allowed = {"type", "dimension", "title", "body", "status", "priority", "owner", "due_date"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if "type" in fields and "dimension" not in fields:
+        fields["dimension"] = TYPE_TO_DIMENSION.get(fields["type"], "scope")
     if not fields:
         return
     sets = ", ".join(f"{k}=?" for k in fields)
@@ -200,7 +256,6 @@ def update_fact(fact_id: int, **kwargs):
 
 
 def append_to_fact(fact_id: int, addition: str):
-    """在 body 末尾追加带时间戳的更新记录，保留变更历史。"""
     ts = datetime.now().strftime("%Y-%m-%d")
     with get_conn() as conn:
         row = conn.execute("SELECT body FROM facts WHERE id=?", (fact_id,)).fetchone()
@@ -218,12 +273,15 @@ def delete_fact(fact_id: int):
         conn.execute("DELETE FROM facts WHERE id=?", (fact_id,))
 
 
-def list_facts(type_: str | None = None, status: str | None = "active",
-               project: str | None = None) -> list:
-    clauses, params = ["type != 'report'"], []  # report 是系统内部类型，不对外展示
+def list_facts(type_: str | None = None, dimension: str | None = None,
+               status: str | None = "active", project: str | None = None) -> list:
+    clauses, params = ["type != 'report'"], []
     if type_:
         clauses.append("type=?")
         params.append(type_)
+    if dimension:
+        clauses.append("dimension=?")
+        params.append(dimension)
     if status:
         clauses.append("status=?")
         params.append(status)
@@ -233,12 +291,11 @@ def list_facts(type_: str | None = None, status: str | None = "active",
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     with get_conn() as conn:
         return conn.execute(
-            f"SELECT * FROM facts {where} ORDER BY type, id", params
+            f"SELECT * FROM facts {where} ORDER BY dimension, type, id", params
         ).fetchall()
 
 
 def find_similar_fact(type_: str, content: str, threshold: int = 2) -> dict | None:
-    """按关键词重叠查找同类型的已有 active 条目。"""
     words = {t for t in re.split(r'[\s，。、；：！？「」【】（）\[\],.!?;:()\-\n]+', content) if len(t) >= 2}
     if not words:
         return None
@@ -260,45 +317,243 @@ def find_similar_fact(type_: str, content: str, threshold: int = 2) -> dict | No
     return best if best_score >= threshold else None
 
 
-# ── AI 上下文拼装 ──────────────────────────────────────────
+# ── 预设假设 CRUD ──────────────────────────────────────────
+
+def add_assumption(title: str, body: str, scope: str = "dept", scope_ref: str = "",
+                   confidence: str = "common", source: str = "manual") -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO assumptions(scope,scope_ref,title,body,confidence,source)"
+            " VALUES(?,?,?,?,?,?)",
+            (scope, scope_ref, title, body, confidence, source),
+        )
+        return cur.lastrowid
+
+
+def get_assumption(assumption_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM assumptions WHERE id=?", (assumption_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_assumption(assumption_id: int, **kwargs):
+    allowed = {"title", "body", "scope", "scope_ref", "confidence", "active"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values())
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE assumptions SET {sets}, updated_at=datetime('now','localtime') WHERE id=?",
+            (*vals, assumption_id),
+        )
+
+
+def delete_assumption(assumption_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM assumptions WHERE id=?", (assumption_id,))
+
+
+def list_assumptions(scope: str | None = None, scope_ref: str | None = None,
+                     active_only: bool = True) -> list:
+    clauses, params = [], []
+    if active_only:
+        clauses.append("active=1")
+    if scope:
+        clauses.append("scope=?")
+        params.append(scope)
+    if scope_ref is not None:
+        clauses.append("scope_ref=?")
+        params.append(scope_ref)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    order = "ORDER BY CASE confidence WHEN 'universal' THEN 0 WHEN 'common' THEN 1 ELSE 2 END, id"
+    with get_conn() as conn:
+        return conn.execute(f"SELECT * FROM assumptions {where} {order}", params).fetchall()
+
+
+# ── 组织单元 CRUD ──────────────────────────────────────────
+
+def add_org_unit(type_: str, name: str, parent_id: int | None = None,
+                 feishu_id: str = "", attributes: dict | None = None) -> int:
+    attrs = _json.dumps(attributes or {}, ensure_ascii=False)
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO org_units(type,name,parent_id,feishu_id,attributes) VALUES(?,?,?,?,?)",
+            (type_, name, parent_id, feishu_id, attrs),
+        )
+        return cur.lastrowid
+
+
+def list_org_units(type_: str | None = None, active_only: bool = True) -> list:
+    clauses, params = [], []
+    if active_only:
+        clauses.append("active=1")
+    if type_:
+        clauses.append("type=?")
+        params.append(type_)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with get_conn() as conn:
+        return conn.execute(f"SELECT * FROM org_units {where} ORDER BY parent_id, id", params).fetchall()
+
+
+# ── AI 上下文拼装（三层结构）─────────────────────────────────
+
+def get_full_context(project: str = "yadi") -> dict:
+    """返回结构化上下文供 AI 使用。
+    Layer 0: 部门预设假设（总是注入）
+    Layer 1: 项目级假设
+    Layer 2+: facts 按维度分组
+    """
+    _PRIO = {"high": "高", "medium": "中", "low": "低"}
+    _TYPE_ZH = {
+        "risk": "风险", "issue": "问题", "blocker": "阻塞", "dependency": "依赖",
+        "milestone": "里程碑", "decision": "决策", "process": "流程",
+        "team": "人员", "client": "客户", "org": "组织", "knowledge": "知识",
+    }
+
+    with get_conn() as conn:
+        # Layer 0: 部门通用假设
+        dept_rows = conn.execute(
+            "SELECT title, body, confidence FROM assumptions"
+            " WHERE active=1 AND scope IN ('dept','global')"
+            " ORDER BY CASE confidence WHEN 'universal' THEN 0 WHEN 'common' THEN 1 ELSE 2 END, id"
+        ).fetchall()
+
+        # Layer 1: 项目专属假设
+        proj_rows = conn.execute(
+            "SELECT title, body, confidence FROM assumptions"
+            " WHERE active=1 AND scope='project' AND scope_ref=?"
+            " ORDER BY id", (project,)
+        ).fetchall()
+
+        # Layer 2: 风险（dimension=risk）
+        risk_rows = conn.execute(
+            "SELECT id, type, title, body, owner, priority, due_date FROM facts"
+            " WHERE dimension='risk' AND status='active' AND project=?"
+            " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id",
+            (project,)
+        ).fetchall()
+
+        # Layer 3: 进度（dimension=schedule）
+        schedule_rows = conn.execute(
+            "SELECT id, type, title, body, due_date FROM facts"
+            " WHERE dimension='schedule' AND status='active' AND project=?"
+            " ORDER BY due_date, id", (project,)
+        ).fetchall()
+
+        # Layer 4: 决策（dimension=decision）
+        decision_rows = conn.execute(
+            "SELECT id, title, body FROM facts"
+            " WHERE dimension='decision' AND status='active'"
+            " ORDER BY id"
+        ).fetchall()
+
+        # Layer 5: 相关方 + 资源（stakeholder/resource/scope）
+        ref_rows = conn.execute(
+            "SELECT id, type, title, body FROM facts"
+            " WHERE dimension IN ('stakeholder','resource','scope') AND status='active'"
+            " ORDER BY dimension, id"
+        ).fetchall()
+
+    def fmt_assumption(rows):
+        if not rows:
+            return ""
+        lines = []
+        for r in rows:
+            tag = _CONFIDENCE_LABEL.get(r["confidence"], r["confidence"])
+            lines.append(f"[{tag}] {r['title']}：{r['body']}")
+        return "\n".join(lines)
+
+    def fmt_risks(rows):
+        if not rows:
+            return ""
+        lines = []
+        for r in rows:
+            t = _TYPE_ZH.get(r["type"], r["type"])
+            p = _PRIO.get(r["priority"], r["priority"])
+            line = f"[{t}·{p}] #{r['id']} {r['title']}：{r['body']}"
+            if r["owner"]:  line += f"（负责人：{r['owner']}）"
+            if r["due_date"]: line += f"（截止：{r['due_date']}）"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def fmt_schedule(rows):
+        if not rows:
+            return ""
+        lines = []
+        for r in rows:
+            t = _TYPE_ZH.get(r["type"], r["type"])
+            line = f"[{t}] #{r['id']} {r['title']}"
+            if r["due_date"]: line += f"（{r['due_date']}）"
+            if r["body"] and r["body"] != r["title"]: line += f"：{r['body'][:80]}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def fmt_generic(rows):
+        if not rows:
+            return ""
+        return "\n\n".join(f"【{r['title']}】\n{r['body']}" for r in rows)
+
+    return {
+        "dept_assumptions":    fmt_assumption(dept_rows),
+        "project_assumptions": fmt_assumption(proj_rows),
+        "risks":               fmt_risks(risk_rows),
+        "schedule":            fmt_schedule(schedule_rows),
+        "decisions":           fmt_generic(decision_rows),
+        "references":          fmt_generic(ref_rows),
+    }
+
+
+# ── 旧版兼容：知识库 / 风险文本（供 nightly review 等使用）───
 
 def get_knowledge_text() -> str:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT title, body FROM facts WHERE status='active'"
-            " AND type NOT IN ('risk','issue','blocker','dependency','report')"
-            " ORDER BY type, id"
-        ).fetchall()
-    if not rows:
-        return ""
-    return "\n\n".join(f"【{r['title']}】\n{r['body']}" for r in rows)
+    ctx = get_full_context()
+    sections = []
+    if ctx["dept_assumptions"]:
+        sections.append("=== 部门预设 ===\n" + ctx["dept_assumptions"])
+    if ctx["project_assumptions"]:
+        sections.append("=== 项目背景 ===\n" + ctx["project_assumptions"])
+    if ctx["decisions"]:
+        sections.append("=== 决策记录 ===\n" + ctx["decisions"])
+    if ctx["references"]:
+        sections.append("=== 参考信息 ===\n" + ctx["references"])
+    return "\n\n".join(sections)
 
 
 def get_risks_text(project: str = "yadi") -> str:
+    return get_full_context(project)["risks"]
+
+
+def get_all_facts_for_review() -> str:
+    _TYPE_ZH = {
+        "risk": "风险", "issue": "问题", "blocker": "阻塞", "dependency": "依赖",
+        "milestone": "里程碑", "decision": "决策", "team": "人员",
+        "client": "客户", "org": "组织", "process": "流程", "knowledge": "知识",
+    }
+    _PRIO_ZH = {"high": "高", "medium": "中", "low": "低"}
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, type, title, body, owner, priority, due_date FROM facts"
-            " WHERE project=? AND status='active'"
-            " AND type IN ('risk','issue','blocker','dependency') ORDER BY id",
-            (project,),
+            "SELECT id, type, dimension, title, body, priority, owner, due_date, updated_at"
+            " FROM facts WHERE status='active' AND type != 'report' ORDER BY dimension, type, id"
         ).fetchall()
     if not rows:
         return ""
-    _PRIO = {"high": "高", "medium": "中", "low": "低"}
-    _TYPE = {"risk": "风险", "issue": "问题", "blocker": "阻塞项", "dependency": "依赖"}
     lines = []
     for r in rows:
-        line = f"[{_TYPE.get(r['type'], r['type'])}·{_PRIO.get(r['priority'], r['priority'])}]"
-        line += f" #{r['id']} {r['title']}：{r['body']}"
-        if r["owner"]:
-            line += f"（负责人：{r['owner']}）"
-        if r["due_date"]:
-            line += f"（截止：{r['due_date']}）"
-        lines.append(line)
+        type_label = _TYPE_ZH.get(r["type"], r["type"])
+        prio  = f" 优先级:{_PRIO_ZH.get(r['priority'], r['priority'])}" if r["priority"] else ""
+        owner = f" 负责人:{r['owner']}" if r["owner"] else ""
+        due   = f" 截止:{r['due_date']}" if r["due_date"] else ""
+        updated = r["updated_at"][:10] if r["updated_at"] else "未知"
+        lines.append(f"#{r['id']} [{type_label}/{r['dimension']}]{prio}{owner}{due} 最后更新:{updated}")
+        lines.append(f"  标题: {r['title']}")
+        lines.append(f"  正文: {r['body'][:200]}")
+        lines.append("")
     return "\n".join(lines)
 
 
-# ── 向后兼容：knowledge_blocks 接口 ───────────────────────
+# ── 旧版兼容：knowledge_blocks 接口 ───────────────────────
 
 def add_block(category: str, title: str, content: str) -> int:
     if category == "note":
@@ -319,7 +574,7 @@ def list_blocks() -> list:
         return conn.execute(
             "SELECT id, type AS category, title,"
             " CASE WHEN status='active' THEN 1 ELSE 0 END AS enabled,"
-            " updated_at FROM facts ORDER BY type, id"
+            " updated_at FROM facts ORDER BY dimension, type, id"
         ).fetchall()
 
 
@@ -342,7 +597,7 @@ def count_notes() -> int:
         ).fetchone()[0]
 
 
-# ── 向后兼容：risks 接口 ───────────────────────────────────
+# ── 旧版兼容：risks 接口 ───────────────────────────────────
 
 def add_risk(type_: str, title: str, description: str,
              owner: str = "", priority: str = "medium",
@@ -358,15 +613,12 @@ def list_risks(status: str | None = None, project: str = "yadi") -> list:
         base = (
             "SELECT id, type, title, body AS description, owner, priority,"
             " status, due_date, project, created_at, updated_at"
-            " FROM facts WHERE project=?"
-            " AND type IN ('risk','issue','blocker','dependency')"
+            " FROM facts WHERE project=? AND dimension='risk'"
         )
         if db_status:
-            rows = conn.execute(base + " AND status=? ORDER BY id",
-                                (project, db_status)).fetchall()
+            rows = conn.execute(base + " AND status=? ORDER BY id", (project, db_status)).fetchall()
         else:
             rows = conn.execute(base + " ORDER BY status, id", (project,)).fetchall()
-    # 将内部 status 映射回对外展示的 open/closed 术语
     result = []
     for r in rows:
         d = dict(r)
@@ -416,9 +668,9 @@ def save_nightly_review(content: str) -> int:
     today = datetime.now().strftime("%Y-%m-%d")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO facts(type,title,body,status,project,source)"
-            " VALUES(?,?,?,?,?,?)",
-            ("report", f"AI数据洗盘 {today}", content, "active", "system", "ai"),
+            "INSERT INTO facts(type,dimension,title,body,status,project,source)"
+            " VALUES(?,?,?,?,?,?,?)",
+            ("report", "system", f"AI数据洗盘 {today}", content, "active", "system", "ai"),
         )
         return cur.lastrowid
 
@@ -430,35 +682,6 @@ def get_latest_nightly_review() -> str | None:
             " ORDER BY id DESC LIMIT 1"
         ).fetchone()
     return row["body"] if row else None
-
-
-def get_all_facts_for_review() -> str:
-    """返回所有 active 非报告条目的摘要文本，供 AI 洗盘分析。"""
-    _TYPE_ZH = {
-        "risk": "风险", "issue": "问题", "blocker": "阻塞", "dependency": "依赖",
-        "milestone": "里程碑", "decision": "决策", "team": "人员",
-        "client": "客户", "org": "组织", "process": "流程", "knowledge": "知识",
-    }
-    _PRIO_ZH = {"high": "高", "medium": "中", "low": "低"}
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT id, type, title, body, priority, owner, due_date, updated_at"
-            " FROM facts WHERE status='active' AND type != 'report' ORDER BY type, id"
-        ).fetchall()
-    if not rows:
-        return ""
-    lines = []
-    for r in rows:
-        type_label = _TYPE_ZH.get(r["type"], r["type"])
-        prio = f" 优先级:{_PRIO_ZH.get(r['priority'], r['priority'])}" if r["priority"] else ""
-        owner = f" 负责人:{r['owner']}" if r["owner"] else ""
-        due = f" 截止:{r['due_date']}" if r["due_date"] else ""
-        updated = r["updated_at"][:10] if r["updated_at"] else "未知"
-        lines.append(f"#{r['id']} [{type_label}]{prio}{owner}{due} 最后更新:{updated}")
-        lines.append(f"  标题: {r['title']}")
-        lines.append(f"  正文: {r['body'][:200]}")
-        lines.append("")
-    return "\n".join(lines)
 
 
 def pop_pending_item(chat_id: str, index: int) -> tuple[dict | None, list[dict]]:

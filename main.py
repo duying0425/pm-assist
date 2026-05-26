@@ -28,8 +28,14 @@ _TYPE_LABELS = {
     "milestone": "里程碑", "decision": "决策", "team": "人员",
     "client": "客户", "org": "组织", "process": "流程", "knowledge": "知识",
 }
+_DIM_LABELS = {
+    "risk": "风险维度", "schedule": "进度维度", "decision": "决策维度",
+    "resource": "资源维度", "stakeholder": "相关方维度", "scope": "范围维度", "system": "系统",
+}
 _PRIO_LABELS = {"high": "高", "medium": "中", "low": "低"}
 _STATUS_LABELS = {"active": "open", "resolved": "resolved", "archived": "archived"}
+_CONF_LABELS = {"universal": "铁律", "common": "通常", "assumed": "推测"}
+_SCOPE_LABELS = {"dept": "部门", "project": "项目", "client": "客户", "global": "全局"}
 
 
 _scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
@@ -50,17 +56,23 @@ async def _run_nightly_review():
 
 
 async def _send_morning_report():
-    """早上9:00：发送风险日报 + AI洗盘报告给主管理员。"""
+    """早上9:00：发送风险日报 + AI洗盘报告给所有收件人。
+    收件人 = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS（与 notify.py 独立脚本逻辑一致）。
+    注意：如果同时开了 crontab 跑 notify.py，主管理员会收到两次，二选一即可。
+    """
+    from config import NOTIFY_OPEN_IDS
     try:
-        if not PRIMARY_ADMIN_OPEN_ID:
-            log.warning("PRIMARY_ADMIN_OPEN_ID not set, skipping morning report")
+        recipients = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS
+        if not recipients:
+            log.warning("no recipients configured (ADMIN_OPEN_IDS and NOTIFY_OPEN_IDS both empty)")
             return
         review = db.get_latest_nightly_review()
+        if not review:
+            log.warning("morning report: no nightly review found (00:30 job may not have run yet)")
         report = _notify.build_morning_report(review)
-        await feishu.send_text_to_user(
-            PRIMARY_ADMIN_OPEN_ID, report, FEISHU_APP_ID, FEISHU_APP_SECRET
-        )
-        log.info("morning report sent to %s", PRIMARY_ADMIN_OPEN_ID)
+        for uid in recipients:
+            await feishu.send_text_to_user(uid, report, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        log.info("morning report sent to %d recipients: %s", len(recipients), recipients)
     except Exception:
         log.exception("morning report error")
 
@@ -146,20 +158,23 @@ async def _handle_card_callback(body: dict) -> dict:
 
     if action == "save_one":
         index = int(value.get("index", -1))
+        saved_count = int(value.get("saved_count", 0))
         saved, remaining = db.pop_pending_item(chat_id, index)
         if saved:
             _save_fact_item(saved)
+            saved_count += 1
             if remaining:
-                return feishu.card_one_saved_response(saved, remaining, chat_id)
-            return feishu.card_saved_response(1)
+                return feishu.card_one_saved_response(saved, remaining, chat_id, saved_count)
+            return feishu.card_saved_response(saved_count)
         return feishu.card_skipped_response()
 
     pending = db.get_pending(chat_id)
     if action == "save_all" and pending:
+        prev_saved = int(value.get("saved_count", 0))
         for item in pending:
             _save_fact_item(item)
         db.clear_pending(chat_id)
-        return feishu.card_saved_response(len(pending))
+        return feishu.card_saved_response(prev_saved + len(pending))
     db.clear_pending(chat_id)
     return feishu.card_skipped_response()
 
@@ -173,22 +188,26 @@ async def _handle_card_trigger(event: dict) -> dict:
 
         if action == "save_one":
             index = int(value.get("index", -1))
+            saved_count = int(value.get("saved_count", 0))
             saved, remaining = db.pop_pending_item(chat_id, index)
             if saved:
                 _save_fact_item(saved)
-                log.info("saved item index=%d remaining=%d", index, len(remaining))
+                saved_count += 1
+                log.info("saved item index=%d remaining=%d total_saved=%d", index, len(remaining), saved_count)
                 if remaining:
-                    return feishu.card_one_saved_response(saved, remaining, chat_id)
-                return feishu.card_saved_response(1)
+                    return feishu.card_one_saved_response(saved, remaining, chat_id, saved_count)
+                return feishu.card_saved_response(saved_count)
             return feishu.card_skipped_response()
 
         pending = db.get_pending(chat_id)
         if action == "save_all" and pending:
+            prev_saved = int(value.get("saved_count", 0))
             for item in pending:
                 _save_fact_item(item)
             db.clear_pending(chat_id)
-            log.info("saved %d items", len(pending))
-            return feishu.card_saved_response(len(pending))
+            total = prev_saved + len(pending)
+            log.info("saved_all: prev=%d new=%d total=%d", prev_saved, len(pending), total)
+            return feishu.card_saved_response(total)
         db.clear_pending(chat_id)
         return feishu.card_skipped_response()
     except Exception:
@@ -253,9 +272,8 @@ async def _handle_message(event: dict):
 
     db.add_message(chat_id, "user", text)
     history = db.get_history(chat_id, MAX_HISTORY)
-    knowledge = db.get_knowledge_text()
-    risks = db.get_risks_text()
-    reply = await claude_client.chat(history, knowledge, risks)
+    context = db.get_full_context()
+    reply = await claude_client.chat(history, context)
     db.add_message(chat_id, "assistant", reply)
     await feishu.send_text(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
 
@@ -345,6 +363,12 @@ def _handle_admin(text: str) -> str:
 
     if cmd == "fact":
         return _handle_admin_fact(parts[2:] if len(parts) > 2 else [])
+
+    if cmd == "assumption":
+        return _handle_admin_assumption(parts[2:] if len(parts) > 2 else [])
+
+    if cmd == "org":
+        return _handle_admin_org(parts[2:] if len(parts) > 2 else [])
 
     return _admin_help()
 
@@ -517,6 +541,132 @@ def _handle_admin_fact(args: list[str]) -> str:
     )
 
 
+def _handle_admin_assumption(args: list[str]) -> str:
+    sub = args[0].lower() if args else ""
+
+    if sub == "list":
+        scope_filter = args[1] if len(args) > 1 else None
+        rows = db.list_assumptions(scope=scope_filter)
+        if not rows:
+            return "暂无预设假设"
+        lines = []
+        for r in rows:
+            scope_tag = _SCOPE_LABELS.get(r["scope"], r["scope"])
+            conf_tag  = _CONF_LABELS.get(r["confidence"], r["confidence"])
+            ref = f"/{r['scope_ref']}" if r["scope_ref"] else ""
+            lines.append(
+                f"#{r['id']} [{scope_tag}{ref}·{conf_tag}] {r['title']}"
+            )
+        return "\n".join(lines)
+
+    if sub == "show" and len(args) >= 2:
+        try:
+            aid = int(args[1])
+        except ValueError:
+            return "ID 必须是数字"
+        row = db.get_assumption(aid)
+        if not row:
+            return f"找不到 #{aid}"
+        scope_tag = _SCOPE_LABELS.get(row["scope"], row["scope"])
+        conf_tag  = _CONF_LABELS.get(row["confidence"], row["confidence"])
+        return (
+            f"#{row['id']} [{scope_tag}·{conf_tag}] {row['title']}\n"
+            f"范围参考：{row['scope_ref'] or '—'}\n"
+            f"创建：{row['created_at'][:16]}  更新：{row['updated_at'][:16]}\n---\n"
+            f"{row['body']}"
+        )
+
+    if sub == "add" and len(args) >= 3:
+        # /admin assumption add [scope] [confidence] [标题] | [正文]
+        # scope: dept|project|client|global
+        # confidence: universal|common|assumed
+        scope      = args[1] if args[1] in ("dept","project","client","global") else "dept"
+        confidence = args[2] if args[2] in ("universal","common","assumed") else "common"
+        rest = " ".join(args[3:])
+        if "|" in rest:
+            title, body = rest.split("|", 1)
+            title, body = title.strip(), body.strip()
+        else:
+            title, body = rest.strip(), rest.strip()
+        scope_ref = ""
+        # 支持 project/雅迪 这种格式指定 scope_ref
+        if "/" in scope:
+            scope, scope_ref = scope.split("/", 1)
+        aid = db.add_assumption(title, body, scope=scope, scope_ref=scope_ref, confidence=confidence)
+        return f"✓ 已添加预设假设 #{aid} [{scope}·{confidence}] {title}"
+
+    if sub == "update" and len(args) >= 4:
+        try:
+            aid = int(args[1])
+        except ValueError:
+            return "ID 必须是数字"
+        field = args[2].lower()
+        value = " ".join(args[3:])
+        allowed = {"title", "body", "scope", "scope_ref", "confidence"}
+        if field not in allowed:
+            return f"可更新字段：{', '.join(sorted(allowed))}"
+        db.update_assumption(aid, **{field: value})
+        return f"✓ 已更新 #{aid}.{field}"
+
+    if sub == "archive" and len(args) >= 2:
+        try:
+            aid = int(args[1])
+        except ValueError:
+            return "ID 必须是数字"
+        db.update_assumption(aid, active=0)
+        return f"✓ 已归档预设 #{aid}"
+
+    if sub == "delete" and len(args) >= 2:
+        try:
+            aid = int(args[1])
+        except ValueError:
+            return "ID 必须是数字"
+        db.delete_assumption(aid)
+        return f"✓ 已删除预设 #{aid}"
+
+    return (
+        "assumption 命令（部门预设假设管理）：\n"
+        "/admin assumption list [dept|project|client]  列出预设\n"
+        "/admin assumption show [ID]                   查看详情\n"
+        "/admin assumption add [scope] [confidence] [标题] | [正文]\n"
+        "  scope: dept|project/项目名|client|global\n"
+        "  confidence: universal（铁律）|common（通常）|assumed（推测）\n"
+        "/admin assumption update [ID] [field] [值]\n"
+        "/admin assumption archive [ID]\n"
+        "/admin assumption delete [ID]"
+    )
+
+
+def _handle_admin_org(args: list[str]) -> str:
+    sub = args[0].lower() if args else ""
+
+    if sub == "list":
+        type_filter = args[1] if len(args) > 1 else None
+        rows = db.list_org_units(type_=type_filter)
+        if not rows:
+            return "暂无组织单元"
+        lines = []
+        for r in rows:
+            indent = "  " if r["parent_id"] else ""
+            lines.append(f"{indent}#{r['id']} [{r['type']}] {r['name']}")
+        return "\n".join(lines)
+
+    if sub == "add" and len(args) >= 3:
+        # /admin org add [type] [name] [parent_id?]
+        type_ = args[1]
+        name  = args[2]
+        parent_id = int(args[3]) if len(args) >= 4 else None
+        oid = db.add_org_unit(type_, name, parent_id=parent_id)
+        return f"✓ 已添加组织单元 #{oid} [{type_}] {name}"
+
+    return (
+        "org 命令（组织结构管理）：\n"
+        "/admin org list [type?]               列出组织单元\n"
+        "/admin org add [type] [名称] [父ID?]  新增\n"
+        "  type: company|dept|team|role|client_org"
+    )
+
+
 def _help_text() -> str:
     return """PM助手使用说明
 
@@ -538,11 +688,21 @@ def _help_text() -> str:
   /admin risk add [type] [priority] [标题] | [描述]
 
 管理员 — 统一信息管理：
-  /admin fact list [type] [active|all]
+  /admin fact list [type|dimension] [active|all]
   /admin fact show [ID]
   /admin fact update [ID] [field] [值]
   /admin fact archive/delete [ID]
-  /admin fact add [type] [标题] | [正文]"""
+  /admin fact add [type] [标题] | [正文]
+
+管理员 — 预设假设（部门公认背景知识）：
+  /admin assumption list [dept|project|client]
+  /admin assumption show [ID]
+  /admin assumption add [scope] [confidence] [标题] | [正文]
+  /admin assumption update/archive/delete [ID]
+
+管理员 — 组织结构：
+  /admin org list
+  /admin org add [type] [名称] [父ID?]"""
 
 
 def _admin_help() -> str:
@@ -550,5 +710,7 @@ def _admin_help() -> str:
         "管理员命令：\n"
         "/admin list/add/update/enable/disable/delete\n"
         "/admin risk list/close/reopen/owner/add\n"
-        "/admin fact list/show/update/archive/delete/add"
+        "/admin fact list/show/update/archive/delete/add\n"
+        "/admin assumption list/show/add/update/archive/delete\n"
+        "/admin org list/add"
     )
