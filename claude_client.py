@@ -210,10 +210,27 @@ async def nightly_review(facts_text: str) -> str:
     try:
         response = await _client.chat.completions.create(
             model=AI_MODEL,
-            max_tokens=3500,
+            max_tokens=8000,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content or ""
+        if content.strip():
+            return content
+
+        retry_prompt = (
+            prompt
+            + "\n\n重要：上一次模型返回了空正文。请不要展开推理，直接输出最终报告；"
+              "必须包含一到八节，如无合并建议也必须输出空的机器可读区。"
+        )
+        response = await _client.chat.completions.create(
+            model=AI_MODEL,
+            max_tokens=8000,
+            messages=[{"role": "user", "content": retry_prompt}],
+        )
+        content = response.choices[0].message.content or ""
+        if content.strip():
+            return content
+        return "AI洗盘分析失败：模型返回空内容，请重试。"
     except Exception as e:
         return f"AI洗盘分析失败：{e}"
 
