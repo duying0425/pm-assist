@@ -315,24 +315,57 @@ async def _handle_message(event: dict):
 
     log.info("chat_id=%s sender=%s msg_type=%s", chat_id, sender_open_id, msg_type)
 
-    if msg_type != "text":
+    if msg_type not in ("text", "post"):
         return
 
     raw = json.loads(message.get("content", "{}"))
-    text = raw.get("text", "").strip()
-    sender_name = ""
-    for mention in message.get("mentions", []):
-        key = mention.get("key", "")
-        if not key:
-            continue
-        if mention.get("is_bot", False):
-            text = text.replace(key, "").strip()
-        else:
-            open_id = mention.get("id", {}).get("open_id", "")
-            name = mention.get("name", "")
-            if open_id and name:
-                db.upsert_person(open_id, name)
-            text = text.replace(key, f"@{name}" if name else "").strip()
+
+    if msg_type == "post":
+        # 飞书 post 消息：直接是 {"title":..., "content":[...]}，无语言包装层
+        post_body = raw.get("zh_cn") or raw.get("en_us") or raw
+        parts = []
+        for paragraph in post_body.get("content", []):
+            for node in paragraph:
+                tag = node.get("tag", "")
+                if tag == "text":
+                    parts.append(node.get("text", ""))
+                elif tag == "at":
+                    uid  = node.get("user_id", "")
+                    uname = node.get("user_name", "")
+                    if uid and uname:
+                        db.upsert_person(uid, uname)
+                    if not node.get("is_bot", False):
+                        parts.append(f"@{uname}" if uname else "")
+                elif tag == "a":
+                    parts.append(node.get("text", ""))
+                # img 等其他 tag 跳过
+        text = "".join(parts).strip()
+        # 去掉 post 消息开头的 @Bot（飞书群里 @Bot 会在富文本首节点）
+        # 注：post 消息的 mentions 字段与 text 消息相同
+        for mention in message.get("mentions", []):
+            if mention.get("is_bot", False):
+                key = mention.get("key", "")
+                if key:
+                    text = text.replace(key, "").strip()
+            else:
+                open_id = mention.get("id", {}).get("open_id", "")
+                name = mention.get("name", "")
+                if open_id and name:
+                    db.upsert_person(open_id, name)
+    else:
+        text = raw.get("text", "").strip()
+        for mention in message.get("mentions", []):
+            key = mention.get("key", "")
+            if not key:
+                continue
+            if mention.get("is_bot", False):
+                text = text.replace(key, "").strip()
+            else:
+                open_id = mention.get("id", {}).get("open_id", "")
+                name = mention.get("name", "")
+                if open_id and name:
+                    db.upsert_person(open_id, name)
+                text = text.replace(key, f"@{name}" if name else "").strip()
 
     # 通过飞书消息中的发送者信息获取姓名
     sender_name = sender.get("sender_id", {}).get("name", "") or ""
@@ -436,7 +469,7 @@ def _register_text() -> str:
     projects = db.list_projects(active_only=True)
     if projects:
         proj_lines = "\n".join(
-            f"  {i+1}. {p['name']}" + (f"（{p['description']}）" if p.get("description") else "")
+            f"  {i+1}. {p['name']}" + (f"（{p['description']}）" if p["description"] else "")
             for i, p in enumerate(projects)
         )
     else:
@@ -846,7 +879,7 @@ def _handle_admin_fact(args: list[str], project: str = "默认") -> str:
         if not rows:
             return "无匹配条目"
         # 判断是否存在多个项目的数据
-        projects_in_data = {r["project"] for r in rows if r.get("project")}
+        projects_in_data = {r["project"] for r in rows if r["project"]}
         multi_project = len(projects_in_data) > 1
         lines = []
         for r in rows:
@@ -855,7 +888,7 @@ def _handle_admin_fact(args: list[str], project: str = "默认") -> str:
             prio = f"·{_PRIO_LABELS[r['priority']]}" if r["priority"] in _PRIO_LABELS else ""
             owner = f"（{r['owner']}）" if r["owner"] else ""
             date = r["updated_at"][:10]
-            proj_tag = f"[{r['project']}]" if multi_project and r.get("project") else ""
+            proj_tag = f"[{r['project']}]" if multi_project and r["project"] else ""
             lines.append(f"#{r['id']} {proj_tag}[{label}{prio}·{status}] {r['title']}{owner} [{date}]")
         return "\n".join(lines)
 
@@ -1077,7 +1110,7 @@ def _handle_admin_user(args: list[str]) -> str:
             status_tag = {"active": "✓", "pending": "⏳", "rejected": "✗", "inactive": "—"}.get(
                 r["status"], r["status"])
             role_zh = _ROLE_ZH.get(r["role"], r["role"])
-            proj = f"/{r['project']}" if r.get("project") else ""
+            proj = f"/{r['project']}" if r["project"] else ""
             lines.append(
                 f"{status_tag} {r['name'] or '(未知)'} [{role_zh}{proj}]"
                 f"  {r['open_id'][:16]}…  加入:{r['created_at'][:10]}"
@@ -1159,8 +1192,8 @@ def _handle_admin_project(args: list[str], sender_open_id: str = "", chat_id: st
         lines = []
         for r in rows:
             status = "✓" if r["active"] else "✗"
-            bound = f"（已绑群聊）" if r["name"] in bindings.values() else ""
-            desc = f"（{r['description']}）" if r.get("description") else ""
+            bound = f"（已绑群聊）" if r["name"] in bindings else ""
+            desc = f"（{r['description']}）" if r["description"] else ""
             lines.append(f"#{r['id']} {status} {r['name']}{desc}{bound}")
         return "\n".join(lines)
 
