@@ -12,6 +12,7 @@ import claude_client
 import db
 import feishu
 import notify as _notify
+from web_admin import router as admin_router
 from config import (
     ADMIN_OPEN_IDS,
     FEISHU_APP_ID,
@@ -95,6 +96,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(admin_router)
 
 
 # ── Webhook 入口 ──────────────────────────────────────────

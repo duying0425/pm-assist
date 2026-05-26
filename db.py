@@ -148,12 +148,22 @@ def init_db():
                 description TEXT    NOT NULL DEFAULT '',
                 created_by  TEXT    NOT NULL DEFAULT '',
                 active      INTEGER NOT NULL DEFAULT 1,
-                created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
             );
+            CREATE INDEX IF NOT EXISTS idx_facts_status_project    ON facts(status, project);
+            CREATE INDEX IF NOT EXISTS idx_todos_status_project     ON todos(status, project);
+            CREATE INDEX IF NOT EXISTS idx_conversations_chat_id    ON conversations(chat_id);
+            CREATE INDEX IF NOT EXISTS idx_processed_events_id      ON processed_events(event_id);
         """)
         # upgrade: add dimension column if coming from old schema
         try:
             conn.execute("ALTER TABLE facts ADD COLUMN dimension TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
+        # upgrade: add updated_at to projects if coming from old schema
+        try:
+            conn.execute("ALTER TABLE projects ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))")
         except Exception:
             pass
         _migrate_legacy(conn)
@@ -1076,7 +1086,10 @@ def update_project(project_id: int, **kwargs):
     sets = ", ".join(f"{k}=?" for k in fields)
     vals = list(fields.values())
     with get_conn() as conn:
-        conn.execute(f"UPDATE projects SET {sets} WHERE id=?", (*vals, project_id))
+        conn.execute(
+            f"UPDATE projects SET {sets}, updated_at=datetime('now','localtime') WHERE id=?",
+            (*vals, project_id),
+        )
 
 
 # ── 系统统计 ──────────────────────────────────────────────

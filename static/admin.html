@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PM Assist 管理后台</title>
+<style>
+:root{--bg:#f1f5f9;--white:#fff;--border:#e2e8f0;--text:#1e293b;--muted:#64748b;--primary:#2563eb;--success:#16a34a;--danger:#dc2626}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:14px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--text)}
+a{color:var(--primary)}
+
+/* Header */
+.header{background:var(--primary);color:#fff;padding:0 20px;height:48px;display:flex;align-items:center;gap:12px}
+.header-title{font-size:15px;font-weight:600;flex:1}
+.header-version{font-size:12px;opacity:.7}
+
+/* Tab nav */
+.tab-nav{background:var(--white);border-bottom:1px solid var(--border);padding:0 20px;display:flex;gap:4px}
+.tab-btn{background:none;border:none;border-bottom:2px solid transparent;padding:10px 14px;cursor:pointer;font:inherit;font-size:13px;color:var(--muted);transition:.15s}
+.tab-btn:hover{color:var(--text)}
+.tab-btn.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+
+/* Content */
+.content{padding:20px;max-width:1200px}
+
+/* Toolbar */
+.toolbar{display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.toolbar select,.toolbar input{height:32px;padding:0 8px;border:1px solid var(--border);border-radius:6px;font:inherit;font-size:13px;background:#fff}
+.toolbar-label{font-weight:600;font-size:14px;flex:1}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;height:32px;padding:0 12px;border-radius:6px;border:1px solid var(--border);cursor:pointer;font:inherit;font-size:13px;font-weight:500;background:#fff;color:var(--text);transition:.15s;white-space:nowrap}
+.btn:hover{background:#f8fafc}
+.btn-primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.btn-primary:hover{background:#1d4ed8}
+.btn-sm{height:26px;padding:0 8px;font-size:12px}
+.btn-success-ghost{color:var(--success);border-color:#d1fae5}
+.btn-success-ghost:hover{background:#d1fae5}
+.btn-danger-ghost{color:var(--danger);border-color:#fee2e2}
+.btn-danger-ghost:hover{background:#fee2e2}
+.btn:disabled{opacity:.5;cursor:default}
+
+/* Table */
+.table-wrap{background:var(--white);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+table{width:100%;border-collapse:collapse}
+th{background:#f8fafc;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);padding:8px 12px;border-bottom:1px solid var(--border);text-align:left;white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#fafafa}
+.id{color:var(--muted);font-size:12px;white-space:nowrap}
+.date{color:var(--muted);font-size:12px;white-space:nowrap}
+.actions{white-space:nowrap;display:flex;gap:4px}
+.title-cell{font-weight:500;line-height:1.4}
+.body-preview{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.3;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.empty{text-align:center;color:var(--muted);padding:32px!important}
+
+/* Stats */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.stat-card{background:#fff;border:1px solid var(--border);border-radius:8px;padding:16px}
+.stat-val{font-size:30px;font-weight:700;color:var(--primary);line-height:1}
+.stat-lbl{font-size:12px;color:var(--muted);margin-top:4px}
+.mini-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.mini-card{background:#fff;border:1px solid var(--border);border-radius:8px;padding:16px}
+.mini-card h4{font-size:12px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+.mini-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:13px}
+
+/* Modal */
+#modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:200;align-items:center;justify-content:center}
+#modal-overlay.open{display:flex}
+.modal-box{background:#fff;border-radius:10px;width:540px;max-width:96vw;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.15)}
+.modal-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.modal-header span{font-weight:600;font-size:15px}
+.modal-close{background:none;border:none;font-size:20px;cursor:pointer;color:var(--muted);line-height:1;padding:0 4px}
+.modal-close:hover{color:var(--text)}
+.modal-body{padding:20px}
+.modal-footer{padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end}
+
+/* Form */
+.fg{margin-bottom:14px}
+.fg label{display:block;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.fg input,.fg select,.fg textarea{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;font:inherit;font-size:13px;transition:.15s}
+.fg input:focus,.fg select:focus,.fg textarea:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px #dbeafe}
+.fg textarea{min-height:80px;resize:vertical}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <span class="header-title">PM Assist 管理后台</span>
+</header>
+
+<nav class="tab-nav">
+  <button class="tab-btn active" data-tab="stats"       onclick="showTab('stats')">概览</button>
+  <button class="tab-btn"        data-tab="facts"       onclick="showTab('facts')">知识库</button>
+  <button class="tab-btn"        data-tab="todos"       onclick="showTab('todos')">待办</button>
+  <button class="tab-btn"        data-tab="users"       onclick="showTab('users')">用户</button>
+  <button class="tab-btn"        data-tab="assumptions" onclick="showTab('assumptions')">预设</button>
+</nav>
+
+<div class="content">
+
+  <!-- 概览 -->
+  <div id="tab-stats" class="tab-content">
+    <div id="stats-content" style="color:var(--muted)">加载中…</div>
+  </div>
+
+  <!-- 知识库 -->
+  <div id="tab-facts" class="tab-content" style="display:none">
+    <div class="toolbar">
+      <select id="facts-type" onchange="loadFacts()">
+        <option value="">全部类型</option>
+        <option value="risk">风险</option><option value="issue">问题</option>
+        <option value="blocker">阻塞</option><option value="dependency">依赖</option>
+        <option value="milestone">里程碑</option><option value="decision">决策</option>
+        <option value="process">流程</option><option value="team">人员</option>
+        <option value="client">客户</option><option value="knowledge">知识</option>
+      </select>
+      <select id="facts-status" onchange="loadFacts()">
+        <option value="active">进行中</option>
+        <option value="">全部状态</option>
+        <option value="resolved">已解决</option>
+        <option value="archived">已归档</option>
+      </select>
+      <select id="facts-project" class="project-filter" onchange="loadFacts()">
+        <option value="">全部项目</option>
+      </select>
+      <button class="btn btn-primary" onclick="openAddFact()">＋ 新增</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th style="width:46px">#</th><th style="width:76px">类型</th>
+          <th>标题</th><th style="width:80px">负责人</th>
+          <th style="width:66px">优先级</th><th style="width:76px">状态</th>
+          <th style="width:90px">更新</th><th style="width:110px">操作</th>
+        </tr></thead>
+        <tbody id="facts-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 待办 -->
+  <div id="tab-todos" class="tab-content" style="display:none">
+    <div class="toolbar">
+      <select id="todos-status" onchange="loadTodos()">
+        <option value="open">进行中</option>
+        <option value="">全部状态</option>
+        <option value="done">已完成</option>
+        <option value="cancelled">已取消</option>
+      </select>
+      <select id="todos-project" class="project-filter" onchange="loadTodos()">
+        <option value="">全部项目</option>
+      </select>
+      <button class="btn btn-primary" onclick="openAddTodo()">＋ 新增</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th style="width:60px">#</th><th>标题</th>
+          <th style="width:80px">负责人</th><th style="width:66px">优先级</th>
+          <th style="width:90px">截止日期</th><th style="width:76px">状态</th>
+          <th style="width:110px">操作</th>
+        </tr></thead>
+        <tbody id="todos-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 用户 -->
+  <div id="tab-users" class="tab-content" style="display:none">
+    <div class="toolbar">
+      <span class="toolbar-label">用户管理</span>
+      <span id="pending-badge"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>姓名 / open_id</th><th style="width:90px">角色</th>
+          <th style="width:80px">项目</th><th style="width:76px">状态</th>
+          <th style="width:90px">注册时间</th><th style="width:160px">操作</th>
+        </tr></thead>
+        <tbody id="users-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 预设 -->
+  <div id="tab-assumptions" class="tab-content" style="display:none">
+    <div class="toolbar">
+      <select id="assumptions-scope" onchange="loadAssumptions()">
+        <option value="">全部范围</option>
+        <option value="global">全局</option><option value="dept">部门</option>
+        <option value="project">项目</option><option value="client">客户</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="assumptions-archived" onchange="loadAssumptions()"> 显示已归档
+      </label>
+      <button class="btn btn-primary" onclick="openAddAssumption()">＋ 新增</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th style="width:46px">#</th><th style="width:100px">范围</th>
+          <th style="width:66px">置信度</th><th>标题</th>
+          <th style="width:110px">操作</th>
+        </tr></thead>
+        <tbody id="assumptions-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div><!-- .content -->
+
+<!-- Modal -->
+<div id="modal-overlay" onclick="closeModalBg(event)">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span id="modal-title">编辑</span>
+      <button class="modal-close" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" id="modal-submit" onclick="submitModal()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Constants ─────────────────────────────────────────────
+const TYPE_ZH = {risk:'风险',issue:'问题',blocker:'阻塞',dependency:'依赖',milestone:'里程碑',decision:'决策',process:'流程',team:'人员',client:'客户',org:'组织',knowledge:'知识'};
+const PRIO_ZH = {high:'高',medium:'中',low:'低'};
+const STATUS_ZH = {active:'进行中',resolved:'已解决',archived:'已归档'};
+const TODO_STATUS_ZH = {open:'进行中',done:'已完成',cancelled:'已取消'};
+const SCOPE_ZH = {dept:'部门',project:'项目',client:'客户',global:'全局'};
+const CONF_ZH = {universal:'铁律',common:'通常',assumed:'推测'};
+const ROLE_ZH = {super_admin:'管理员',pm:'项目经理',member:'成员',pending:'待审批'};
+const USER_STATUS_ZH = {active:'已激活',pending:'待审批',rejected:'已拒绝',inactive:'已停用'};
+
+const TYPE_S = {risk:['#fee2e2','#991b1b'],issue:['#fef3c7','#92400e'],blocker:['#ede9fe','#5b21b6'],dependency:['#dbeafe','#1e40af'],milestone:['#d1fae5','#065f46'],decision:['#e0f2fe','#0369a1'],process:['#e0e7ff','#3730a3'],team:['#fce7f3','#9d174d'],client:['#fefce8','#713f12'],org:['#f1f5f9','#475569'],knowledge:['#f0fdf4','#166534']};
+const PRIO_S = {high:['#fee2e2','#991b1b'],medium:['#fef9c3','#854d0e'],low:['#f0fdf4','#166534']};
+const FSTAT_S = {active:['#d1fae5','#065f46'],resolved:['#dbeafe','#1e40af'],archived:['#f1f5f9','#64748b']};
+const TSTAT_S = {open:['#dbeafe','#1e40af'],done:['#d1fae5','#065f46'],cancelled:['#f1f5f9','#64748b']};
+const USTAT_S = {active:['#d1fae5','#065f46'],pending:['#fef3c7','#92400e'],rejected:['#fee2e2','#991b1b'],inactive:['#f1f5f9','#64748b']};
+const CONF_S = {universal:['#fee2e2','#991b1b'],common:['#dbeafe','#1e40af'],assumed:['#f1f5f9','#64748b']};
+const SCOPE_S = {global:['#ede9fe','#5b21b6'],dept:['#dbeafe','#1e40af'],project:['#d1fae5','#065f46'],client:['#fef3c7','#92400e']};
+
+// ── State ─────────────────────────────────────────────────
+let projects=[], lastFacts=[], lastTodos=[], lastUsers=[], lastAssumptions=[], modalCb=null;
+
+// ── API ───────────────────────────────────────────────────
+async function api(method,path,data){
+  const r=await fetch('/admin/api'+path,{method,headers:{'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined});
+  const j=await r.json();
+  if(!r.ok){alert('错误：'+(j.detail||JSON.stringify(j)));throw j;}
+  return j;
+}
+
+// ── Helpers ───────────────────────────────────────────────
+const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const escA=s=>String(s??'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+function bdg(text,bg,fg='#1f2937'){return`<span style="background:${bg};color:${fg};padding:1px 7px;border-radius:4px;font-size:11px;font-weight:600;white-space:nowrap">${esc(text)}</span>`;}
+function tbdg(t){const[bg,fg]=TYPE_S[t]||['#f1f5f9','#374151'];return bdg(TYPE_ZH[t]||t,bg,fg);}
+function pbdg(p){if(!p)return'—';const[bg,fg]=PRIO_S[p]||['#f1f5f9','#374151'];return bdg(PRIO_ZH[p]||p,bg,fg);}
+function fsbdg(s){const[bg,fg]=FSTAT_S[s]||['#f1f5f9','#374151'];return bdg(STATUS_ZH[s]||s,bg,fg);}
+function tsbdg(s){const[bg,fg]=TSTAT_S[s]||['#f1f5f9','#374151'];return bdg(TODO_STATUS_ZH[s]||s,bg,fg);}
+function usbdg(s){const[bg,fg]=USTAT_S[s]||['#f1f5f9','#374151'];return bdg(USER_STATUS_ZH[s]||s,bg,fg);}
+function cfbdg(c){const[bg,fg]=CONF_S[c]||['#f1f5f9','#374151'];return bdg(CONF_ZH[c]||c,bg,fg);}
+function scbdg(s,r){const[bg,fg]=SCOPE_S[s]||['#f1f5f9','#374151'];return bdg((SCOPE_ZH[s]||s)+(r?'/'+r:''),bg,fg);}
+function rbdg(r){return bdg(ROLE_ZH[r]||r,'#e0e7ff','#3730a3');}
+const fd=s=>s?String(s).slice(0,10):'—';
+
+function projOpts(cur='',all=false){
+  return(all?'<option value="">全部项目</option>':'')+projects.filter(p=>p.active).map(p=>`<option value="${escA(p.name)}"${p.name===cur?' selected':''}>${esc(p.name)}</option>`).join('');
+}
+function updateProjSelects(){
+  document.querySelectorAll('.project-filter').forEach(el=>{const v=el.value;el.innerHTML='<option value="">全部项目</option>'+projects.filter(p=>p.active).map(p=>`<option value="${escA(p.name)}">${esc(p.name)}</option>`).join('');if(v)el.value=v;});
+}
+
+// ── Tabs ──────────────────────────────────────────────────
+function showTab(name){
+  document.querySelectorAll('.tab-content').forEach(el=>el.style.display='none');
+  document.querySelectorAll('.tab-btn').forEach(el=>el.classList.remove('active'));
+  document.getElementById('tab-'+name).style.display='';
+  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
+  if(name==='stats')loadStats();
+  else if(name==='facts')loadFacts();
+  else if(name==='todos')loadTodos();
+  else if(name==='users')loadUsers();
+  else if(name==='assumptions')loadAssumptions();
+}
+
+// ── Stats ─────────────────────────────────────────────────
+async function loadStats(){
+  const[stats,projs]=await Promise.all([api('GET','/stats'),api('GET','/projects')]);
+  projects=projs;
+  updateProjSelects();
+  const fm=Object.fromEntries(stats.facts.map(r=>[r.type,r.cnt]));
+  const tm=Object.fromEntries(stats.todos.map(r=>[r.status,r.cnt]));
+  const um={};for(const r of stats.users){if(!um[r.role])um[r.role]={};um[r.role][r.status]=r.cnt;}
+  const active=['super_admin','pm','member'].reduce((s,r)=>s+(um[r]?.active||0),0);
+  const pending=Object.values(um).reduce((s,v)=>s+(v.pending||0),0);
+  const ftotal=stats.facts.reduce((s,r)=>s+r.cnt,0);
+  document.getElementById('stats-content').innerHTML=`
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-val">${stats.project_count}</div><div class="stat-lbl">活跃项目</div></div>
+      <div class="stat-card"><div class="stat-val">${ftotal}</div><div class="stat-lbl">知识库条目</div></div>
+      <div class="stat-card"><div class="stat-val">${tm.open||0}</div><div class="stat-lbl">待办进行中</div></div>
+      <div class="stat-card" style="${pending?'border-color:#f59e0b':''}"><div class="stat-val">${active}</div><div class="stat-lbl">活跃用户${pending?` <span style="color:#d97706;font-size:12px">(${pending}待审)</span>`:''}</div></div>
+    </div>
+    <div class="mini-grid">
+      <div class="mini-card"><h4>知识库分布</h4>${Object.entries(TYPE_ZH).filter(([t])=>fm[t]).map(([t])=>`<div class="mini-row">${tbdg(t)}<span>${fm[t]} 条</span></div>`).join('')||'<span style="color:var(--muted)">暂无</span>'}</div>
+      <div class="mini-card"><h4>待办统计</h4>${['open','done','cancelled'].map(s=>`<div class="mini-row">${tsbdg(s)}<span>${tm[s]||0} 条</span></div>`).join('')}</div>
+      <div class="mini-card"><h4>最近 AI 洗盘</h4><div style="color:var(--muted);font-size:13px">${esc(stats.last_review)}</div></div>
+    </div>`;
+}
+
+// ── Facts ─────────────────────────────────────────────────
+async function loadFacts(){
+  const p=new URLSearchParams({type:document.getElementById('facts-type')?.value||'',status:document.getElementById('facts-status')?.value||'active',project:document.getElementById('facts-project')?.value||''});
+  lastFacts=await api('GET',`/facts?${p}`);
+  const tb=document.getElementById('facts-tbody');
+  if(!lastFacts.length){tb.innerHTML='<tr><td colspan="8" class="empty">暂无数据</td></tr>';return;}
+  tb.innerHTML=lastFacts.map(f=>`<tr>
+    <td class="id">#${f.id}</td>
+    <td>${tbdg(f.type)}</td>
+    <td><div class="title-cell">${esc(f.title)}</div>${f.body&&f.body!==f.title?`<div class="body-preview">${esc(f.body.slice(0,60))}${f.body.length>60?'…':''}</div>`:''}</td>
+    <td>${esc(f.owner||'—')}</td>
+    <td>${pbdg(f.priority)}</td>
+    <td>${fsbdg(f.status)}</td>
+    <td class="date">${fd(f.updated_at)}</td>
+    <td class="actions"><button class="btn btn-sm" onclick="editFact(${f.id})">编辑</button>${f.status!=='archived'?`<button class="btn btn-sm btn-danger-ghost" onclick="archiveFact(${f.id})">归档</button>`:''}</td>
+  </tr>`).join('');
+}
+function openAddFact(){
+  const def=projects.find(p=>p.active)?.name||'';
+  openModal('新增知识库条目',factForm({project:def,status:'active'}),async()=>{await api('POST','/facts',collectFact());loadFacts();});
+}
+function editFact(id){
+  const f=lastFacts.find(x=>x.id===id);if(!f)return;
+  openModal('编辑条目 #'+id,factForm(f),async()=>{await api('PATCH',`/facts/${id}`,collectFact());loadFacts();});
+}
+async function archiveFact(id){if(!confirm('确认归档此条目？'))return;await api('DELETE',`/facts/${id}`);loadFacts();}
+function factForm(f={}){
+  const types=Object.entries(TYPE_ZH);
+  return`<div class="form-row">
+    <div class="fg"><label>类型</label><select id="f-type">${types.map(([v,l])=>`<option value="${v}"${f.type===v?' selected':''}>${l}</option>`).join('')}</select></div>
+    <div class="fg"><label>优先级</label><select id="f-priority"><option value="">—</option>${['high','medium','low'].map(p=>`<option value="${p}"${f.priority===p?' selected':''}>${PRIO_ZH[p]}</option>`).join('')}</select></div>
+  </div>
+  <div class="fg"><label>标题</label><input id="f-title" value="${escA(f.title||'')}"></div>
+  <div class="fg"><label>内容</label><textarea id="f-body">${esc(f.body||'')}</textarea></div>
+  <div class="form-row">
+    <div class="fg"><label>负责人</label><input id="f-owner" value="${escA(f.owner||'')}"></div>
+    <div class="fg"><label>截止日期</label><input id="f-due" type="date" value="${escA(f.due_date||'')}"></div>
+  </div>
+  <div class="form-row">
+    <div class="fg"><label>状态</label><select id="f-status">${['active','resolved','archived'].map(s=>`<option value="${s}"${f.status===s?' selected':''}>${STATUS_ZH[s]}</option>`).join('')}</select></div>
+    <div class="fg"><label>项目</label><select id="f-project">${projOpts(f.project)}</select></div>
+  </div>`;
+}
+function collectFact(){return{type:document.getElementById('f-type').value,title:document.getElementById('f-title').value.trim(),body:document.getElementById('f-body').value.trim(),priority:document.getElementById('f-priority').value,status:document.getElementById('f-status').value,owner:document.getElementById('f-owner').value.trim(),due_date:document.getElementById('f-due').value,project:document.getElementById('f-project').value};}
+
+// ── Todos ─────────────────────────────────────────────────
+async function loadTodos(){
+  const p=new URLSearchParams({status:document.getElementById('todos-status')?.value||'open',project:document.getElementById('todos-project')?.value||''});
+  lastTodos=await api('GET',`/todos?${p}`);
+  const tb=document.getElementById('todos-tbody');
+  if(!lastTodos.length){tb.innerHTML='<tr><td colspan="7" class="empty">暂无数据</td></tr>';return;}
+  tb.innerHTML=lastTodos.map(t=>`<tr>
+    <td class="id">#T${t.id}</td>
+    <td><div class="title-cell">${esc(t.title)}</div>${t.source_fact_id?`<div class="body-preview">← risk #${t.source_fact_id}</div>`:''}</td>
+    <td>${esc(t.owner||'—')}</td>
+    <td>${pbdg(t.priority)}</td>
+    <td class="date">${fd(t.due_date)}</td>
+    <td>${tsbdg(t.status)}</td>
+    <td class="actions"><button class="btn btn-sm" onclick="editTodo(${t.id})">编辑</button>${t.status==='open'?`<button class="btn btn-sm btn-success-ghost" onclick="doneTodo(${t.id})">完成</button>`:''}</td>
+  </tr>`).join('');
+}
+function openAddTodo(){
+  const def=projects.find(p=>p.active)?.name||'';
+  openModal('新增待办',todoForm({status:'open',priority:'medium',project:def}),async()=>{await api('POST','/todos',collectTodo());loadTodos();});
+}
+function editTodo(id){
+  const t=lastTodos.find(x=>x.id===id);if(!t)return;
+  openModal('编辑待办 #T'+id,todoForm(t),async()=>{await api('PATCH',`/todos/${id}`,collectTodo());loadTodos();});
+}
+async function doneTodo(id){await api('PATCH',`/todos/${id}`,{status:'done'});loadTodos();}
+function todoForm(t={}){return`
+  <div class="fg"><label>标题</label><input id="t-title" value="${escA(t.title||'')}"></div>
+  <div class="fg"><label>备注</label><textarea id="t-body">${esc(t.body||'')}</textarea></div>
+  <div class="form-row">
+    <div class="fg"><label>负责人</label><input id="t-owner" value="${escA(t.owner||'')}"></div>
+    <div class="fg"><label>截止日期</label><input id="t-due" type="date" value="${escA(t.due_date||'')}"></div>
+  </div>
+  <div class="form-row">
+    <div class="fg"><label>优先级</label><select id="t-priority">${['high','medium','low'].map(p=>`<option value="${p}"${t.priority===p?' selected':''}>${PRIO_ZH[p]}</option>`).join('')}</select></div>
+    <div class="fg"><label>状态</label><select id="t-status">${['open','done','cancelled'].map(s=>`<option value="${s}"${t.status===s?' selected':''}>${TODO_STATUS_ZH[s]}</option>`).join('')}</select></div>
+  </div>
+  <div class="fg"><label>项目</label><select id="t-project">${projOpts(t.project)}</select></div>`;}
+function collectTodo(){return{title:document.getElementById('t-title').value.trim(),body:document.getElementById('t-body').value.trim(),owner:document.getElementById('t-owner').value.trim(),due_date:document.getElementById('t-due').value,priority:document.getElementById('t-priority').value,status:document.getElementById('t-status').value,project:document.getElementById('t-project').value};}
+
+// ── Users ─────────────────────────────────────────────────
+async function loadUsers(){
+  lastUsers=await api('GET','/users');
+  const pending=lastUsers.filter(u=>u.status==='pending');
+  document.getElementById('pending-badge').innerHTML=pending.length?bdg(pending.length+' 待审批','#fef3c7','#92400e'):'';
+  document.getElementById('users-tbody').innerHTML=lastUsers.map(u=>`<tr style="${u.status==='pending'?'background:#fffbeb':''}">
+    <td><div class="title-cell">${esc(u.name||'(未知)')}</div><div class="body-preview" style="font-family:monospace;font-size:11px">${esc(u.open_id)}</div></td>
+    <td>${rbdg(u.role)}</td>
+    <td>${esc(u.project||'—')}</td>
+    <td>${usbdg(u.status)}</td>
+    <td class="date">${fd(u.created_at)}</td>
+    <td class="actions">${u.status==='pending'
+      ?`<button class="btn btn-sm btn-success-ghost" onclick="approveUser('${escA(u.open_id)}','${escA(u.role)}','${escA(u.project)}')">批准</button><button class="btn btn-sm btn-danger-ghost" onclick="rejectUser('${escA(u.open_id)}')">拒绝</button>`
+      :`<button class="btn btn-sm" onclick="editUser('${escA(u.open_id)}')">编辑</button>`
+    }</td>
+  </tr>`).join('');
+}
+async function approveUser(oid,role,project){await api('PATCH',`/users/${encodeURIComponent(oid)}`,{status:'active',role,project});loadUsers();}
+async function rejectUser(oid){if(!confirm('确认拒绝此用户？'))return;await api('PATCH',`/users/${encodeURIComponent(oid)}`,{status:'rejected'});loadUsers();}
+function editUser(oid){
+  const u=lastUsers.find(x=>x.open_id===oid);if(!u)return;
+  openModal('编辑用户',userForm(u),async()=>{await api('PATCH',`/users/${encodeURIComponent(oid)}`,collectUser());loadUsers();});
+}
+function userForm(u={}){return`
+  <div class="fg"><label>姓名</label><input id="u-name" value="${escA(u.name||'')}"></div>
+  <div class="form-row">
+    <div class="fg"><label>角色</label><select id="u-role">${['super_admin','pm','member'].map(r=>`<option value="${r}"${u.role===r?' selected':''}>${ROLE_ZH[r]}</option>`).join('')}</select></div>
+    <div class="fg"><label>状态</label><select id="u-status">${['active','inactive','rejected'].map(s=>`<option value="${s}"${u.status===s?' selected':''}>${USER_STATUS_ZH[s]||s}</option>`).join('')}</select></div>
+  </div>
+  <div class="fg"><label>项目</label><select id="u-project"><option value="">—</option>${projects.filter(p=>p.active).map(p=>`<option value="${escA(p.name)}"${u.project===p.name?' selected':''}>${esc(p.name)}</option>`).join('')}</select></div>`;}
+function collectUser(){return{name:document.getElementById('u-name').value.trim(),role:document.getElementById('u-role').value,status:document.getElementById('u-status').value,project:document.getElementById('u-project').value};}
+
+// ── Assumptions ───────────────────────────────────────────
+async function loadAssumptions(){
+  const scope=document.getElementById('assumptions-scope')?.value||'';
+  const activeOnly=!document.getElementById('assumptions-archived')?.checked;
+  lastAssumptions=await api('GET',`/assumptions?scope=${encodeURIComponent(scope)}&active_only=${activeOnly}`);
+  const tb=document.getElementById('assumptions-tbody');
+  if(!lastAssumptions.length){tb.innerHTML='<tr><td colspan="5" class="empty">暂无数据</td></tr>';return;}
+  tb.innerHTML=lastAssumptions.map(a=>`<tr style="${!a.active?'opacity:.5':''}">
+    <td class="id">#${a.id}</td>
+    <td>${scbdg(a.scope,a.scope_ref)}</td>
+    <td>${cfbdg(a.confidence)}</td>
+    <td><div class="title-cell">${esc(a.title)}</div><div class="body-preview">${esc((a.body||'').slice(0,60))}${(a.body||'').length>60?'…':''}</div></td>
+    <td class="actions"><button class="btn btn-sm" onclick="editAssumption(${a.id})">编辑</button>${a.active?`<button class="btn btn-sm btn-danger-ghost" onclick="archiveAssumption(${a.id})">归档</button>`:''}</td>
+  </tr>`).join('');
+}
+function openAddAssumption(){openModal('新增预设假设',assumptionForm(),async()=>{await api('POST','/assumptions',collectAssumption());loadAssumptions();});}
+function editAssumption(id){const a=lastAssumptions.find(x=>x.id===id);if(!a)return;openModal('编辑预设 #'+id,assumptionForm(a),async()=>{await api('PATCH',`/assumptions/${id}`,collectAssumption());loadAssumptions();});}
+async function archiveAssumption(id){if(!confirm('确认归档此预设？'))return;await api('DELETE',`/assumptions/${id}`);loadAssumptions();}
+function assumptionForm(a={}){return`
+  <div class="form-row">
+    <div class="fg"><label>范围</label><select id="a-scope">${['dept','project','client','global'].map(s=>`<option value="${s}"${a.scope===s?' selected':''}>${SCOPE_ZH[s]}</option>`).join('')}</select></div>
+    <div class="fg"><label>范围参考（项目/客户名）</label><input id="a-ref" value="${escA(a.scope_ref||'')}"></div>
+  </div>
+  <div class="fg"><label>置信度</label><select id="a-conf">${['universal','common','assumed'].map(c=>`<option value="${c}"${a.confidence===c?' selected':''}>${CONF_ZH[c]}</option>`).join('')}</select></div>
+  <div class="fg"><label>标题</label><input id="a-title" value="${escA(a.title||'')}"></div>
+  <div class="fg"><label>内容</label><textarea id="a-body">${esc(a.body||'')}</textarea></div>`;}
+function collectAssumption(){return{scope:document.getElementById('a-scope').value,scope_ref:document.getElementById('a-ref').value.trim(),confidence:document.getElementById('a-conf').value,title:document.getElementById('a-title').value.trim(),body:document.getElementById('a-body').value.trim()};}
+
+// ── Modal ─────────────────────────────────────────────────
+function openModal(title,html,cb){
+  document.getElementById('modal-title').textContent=title;
+  document.getElementById('modal-body').innerHTML=html;
+  modalCb=cb;
+  document.getElementById('modal-overlay').classList.add('open');
+  setTimeout(()=>document.querySelector('#modal-body input,#modal-body select')?.focus(),80);
+}
+function closeModal(){document.getElementById('modal-overlay').classList.remove('open');modalCb=null;}
+function closeModalBg(e){if(e.target===document.getElementById('modal-overlay'))closeModal();}
+async function submitModal(){
+  if(!modalCb)return;
+  const btn=document.getElementById('modal-submit');
+  btn.disabled=true;
+  try{await modalCb();closeModal();}catch(e){}finally{btn.disabled=false;}
+}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+
+// ── Init ──────────────────────────────────────────────────
+loadStats();
+</script>
+</body>
+</html>

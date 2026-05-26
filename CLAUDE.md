@@ -36,9 +36,9 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `0.6.0`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `0.7.0`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
-- 每次部署前修改 `VERSION`，本地 `git tag v0.6.0 && git push --tags`，scp 时一并上传
+- 每次部署前修改 `VERSION`，本地 `git tag v0.7.0 && git push --tags`，scp 时一并上传
 
 ## 代码结构
 ```
@@ -47,12 +47,15 @@ pm-assist/
 ├── claude_client.py # AI 对话(chat) + 信息提取(extract_facts) + 洗盘(nightly_review) + 分解(decompose_risk)
 ├── feishu.py        # 飞书 API：发文本、发交互卡片、卡片响应格式
 ├── db.py            # SQLite CRUD：四层数据（assumptions/org_units/facts/todos）
+├── web_admin.py     # Web 管理后台 REST API（FastAPI Router，挂载于 /admin）
 ├── config.py        # 环境变量加载（从 .env 读取）
 ├── notify.py        # 消息推送：build_risk_section() + build_morning_report(review)
 ├── VERSION          # 版本号文件，格式 x.y.z
 ├── migrate_v2.py    # 一次性迁移脚本（已执行，勿重复执行）
 ├── seed.py          # 初始知识库数据（已执行，勿重复执行）
 ├── seed_yadi.py     # 雅迪项目初始数据（已执行，勿重复执行）
+├── static/
+│   └── admin.html   # Web 管理后台单页 UI（纯 HTML/CSS/JS，无外部依赖）
 ├── deploy/
 │   ├── nginx.conf        # nginx 站点配置模板
 │   ├── pm-assist.service # systemd 服务文件（备用，当前未启用）
@@ -252,7 +255,15 @@ event_id（PRIMARY KEY）/ created_at
 
 ### 数据库新增表
 - **users**：`open_id/name/role/project/status(pending|active|rejected|inactive)`
-- **projects**：`name/description/created_by/active`；默认种入「雅迪」项目
+- **projects**：`name/description/created_by/active/updated_at`；默认种入「雅迪」项目
+- `projects.updated_at` 在 v0.7.0 补加，`init_db()` 会自动 ALTER TABLE 升级旧库
+
+### 数据库索引（v0.7.0 新增）
+`init_db()` 自动创建以下索引（幂等，重启即生效）：
+- `idx_facts_status_project`：`facts(status, project)`
+- `idx_todos_status_project`：`todos(status, project)`
+- `idx_conversations_chat_id`：`conversations(chat_id)`
+- `idx_processed_events_id`：`processed_events(event_id)`
 
 ### AI 说话人注入
 每次对话在 system prompt 注入当前用户身份，例：
@@ -291,6 +302,8 @@ event_id（PRIMARY KEY）/ created_at
 22. **AI 纯文本输出**：系统提示约束 AI 不输出 Markdown 符号；`feishu._strip_md()` 二次兜底剥除残留格式（v0.6.3）
 23. **待办意图自动提取**：用户对话中明确说"加个待办/提醒"时，AI 自动识别并弹出确认卡片，支持逐条或全部新增（v0.6.3）
 24. **`/admin fact decompose` 卡片确认**：AI 分解 risk 后不再直接写库，改为弹出待办确认卡片，用户可按需选择保存（v0.6.3）
+25. **Web 管理后台**：浏览器访问 `https://pm.tmhcorps.cn/admin/`，可视化管理知识库/待办/用户/预设，无需登录（内部工具）（v0.7.0）
+26. **数据库索引优化**：`facts/todos/conversations/processed_events` 核心查询字段加索引，`projects` 表补加 `updated_at`（v0.7.0）
 
 ## 命令速查
 
@@ -374,18 +387,21 @@ PRIMARY_ADMIN_OPEN_ID=ou_d1ccad1071d7daf767337953ffeb317a
 - APScheduler 的定时任务在服务重启后重新注册，若服务在 00:30 后重启，当天洗盘会跳过（次日才补跑）
 
 ## 服务器当前状态
-- v0.6.3 已部署（思考中占位、AI纯文本、待办意图提取、decompose卡片确认）
+- v0.7.0 已部署（Web 管理后台 + DB 索引优化）
+- Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
 - todos/users/projects 表由 `init_db()` 自动创建，无需手动迁移
+- v0.7.0 起 `init_db()` 自动补加 projects.updated_at 列和4条索引（幂等）
 - notify.py 的 crontab 条目已删除（早报改由 APScheduler 统一发送）
 - **部署后首次启动**：`init_db()` 自动创建 users/projects 表并种入「雅迪」项目；.env 中的 ADMIN_OPEN_IDS 用户首次发消息时自动注册为 super_admin
 
 ## 待开发
 - [ ] 佟海鹏 open_id 添加到 .env ADMIN_OPEN_IDS（让他在飞书发一条消息看日志）
 - [ ] systemd 自动重启（当前重启服务器后需手动拉起）
-- [ ] 项目上下文感知（群组绑定项目，自动注入项目信息）
-- [ ] 多项目支持（当前 facts/todos 仍默认 project=yadi）
-- [ ] 知识库 Web 管理后台
+- [ ] Web 后台登录认证（当前无认证，内部工具暂可接受）
+- [ ] 多项目支持完善（Web 后台已支持筛选，飞书侧已有群聊绑定）
+- [x] 知识库 Web 管理后台（v0.7.0，`https://pm.tmhcorps.cn/admin/`）
+- [x] 群组绑定项目（`/admin project bind`，代码已全部实现）
 - [x] 待办事项系统（todos 表 + /todo 命令 + AI 分解 + 上下文注入）
 - [x] 时间戳注入 AI 上下文
 - [x] AI 语言约束（不说"已记录"）
