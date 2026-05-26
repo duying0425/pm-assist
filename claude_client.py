@@ -189,7 +189,7 @@ _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析
 九、机器可读合并建议
 - 必须放在报告最后，格式严格如下；没有合并建议时 merge_candidates 为空数组：
 ===MERGE_CANDIDATES_JSON===
-{"merge_candidates":[{"keep_id":12,"merge_ids":[18,21],"reason":"描述同一件事，#12 信息更完整","append_text":"#18/#21 补充的信息：华阳尚未给出明确完成时间，需持续跟进。"}]}
+{{"merge_candidates":[{{"keep_id":12,"merge_ids":[18,21],"reason":"描述同一件事，#12 信息更完整","append_text":"#18/#21 补充的信息：华阳尚未给出明确完成时间，需持续跟进。"}}]}}
 ===END_MERGE_CANDIDATES_JSON===
 
 命令约束：
