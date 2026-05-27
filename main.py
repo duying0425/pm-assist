@@ -253,10 +253,10 @@ def _strip_clarify(text: str) -> str:
     return text
 
 
-_EXECUTION_CLAIM_RE = re.compile(r"(已确认|已更新|已保存|已执行)")
+_EXECUTION_CLAIM_RE = re.compile(r"(已确认|已更新|已保存|已执行|已记录|我会记住)")
 
 
-def _sanitize_ai_execution_claims(text: str) -> str:
+def _sanitize_ai_execution_claims(text: str, will_send_card: bool = False) -> str:
     """Prevent AI from claiming DB changes were already executed in chat mode."""
     has_claim = bool(_EXECUTION_CLAIM_RE.search(text))
     has_command = any(
@@ -265,8 +265,13 @@ def _sanitize_ai_execution_claims(text: str) -> str:
     )
     if not has_claim or has_command:
         return text
+    if will_send_card:
+        return (
+            "**提示：** AI 检测到可保存的建议，已弹出确认卡片，请按需确认入库。\n\n"
+            + text
+        )
     return (
-        "提示：以下内容是建议，系统尚未执行数据库更新。请通过确认卡片或命令确认后再落库。\n\n"
+        "**提示：** AI 提及了可记录的信息，但本次未生成确认卡片。如需保存，请用 `/note`、`/risk add` 或 `/todo` 命令手动记录。\n\n"
         + text
     )
 
@@ -1691,9 +1696,8 @@ async def _handle_message(event: dict):
 
     if text == "/clear":
         db.clear_history(chat_id)
-        db.clear_pending(chat_id)
-        db.clear_pending_todos(chat_id)
-        db.clear_pending_commands(chat_id)
+        _clear_all_pending_confirmations(chat_id)
+        db.clear_pending_clarify(chat_id)
         await feishu.send_reply(chat_id, "对话历史已清除。", FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
@@ -1754,7 +1758,8 @@ async def _handle_message(event: dict):
     # 先存原始干净回复到历史（避免 sanitize 文本污染对话上下文）
     db.add_message(chat_id, "assistant", clean_reply)
     # 仅在展示给用户时才加"已执行"误导性措辞警告
-    display_reply = _sanitize_ai_execution_claims(clean_reply)
+    will_send_card = bool(suggestions) and user_role in ("pm", "super_admin")
+    display_reply = _sanitize_ai_execution_claims(clean_reply, will_send_card=will_send_card)
 
     # 用实际回复卡片原地更新占位消息
     reply_card = feishu.build_md_card(display_reply)
