@@ -36,7 +36,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `0.8.1`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `0.9.0`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
 - 每次部署前修改 `VERSION`，本地 `git tag vX.Y.Z && git push --tags`，scp 时一并上传
 
@@ -528,61 +528,67 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 所有卡片 builder 和响应函数均在 `feishu.py`，card callback 分发在 `main.py` 的 `_handle_card_callback` / `_handle_card_trigger`。
 
 ### 通用说明
-- **两类回调路由**：
-  - `card.action.trigger`（飞书新协议）→ `_handle_card_trigger`：审批卡片、详情查看、澄清问题、待办/合并/清洗动作确认
-  - `_handle_card_callback`（旧协议）：知识库确认卡片（save_one/save_all/skip）
+- **两类回调路由**（两者处理的 action 完全相同，飞书新旧协议均兼容）：
+  - `card.action.trigger`（飞书新协议）→ `_handle_card_trigger`
+  - `_handle_card_callback`（旧协议）：body 含 `action` + `open_message_id` 字段
 - **回调响应格式**：`{"toast":{"type":"success/info/error","content":"..."}, "card":{"type":"raw","data":{...card body...}}}`
 - **卡片发送**：`send_reply(chat_id, card_dict, ...)` / `send_reply_to_user(open_id, card_dict, ...)` 接受 dict 直接发 interactive；短文本走 text；长文本自动包成 `build_md_card`
+- **卡片原地更新**：`update_message_card(message_id, card, ...)` → `PATCH /im/v1/messages/{id}`，config 自动注入 `update_multi:true`
+- **pending 存储**：AI 建议用 `pending_commands`；洗盘合并用 `pending_merges`；洗盘清洗用 `pending_actions`；均 TTL=30 分钟
 
 ---
 
 ### 卡片 1：通用 lark_md 卡片
 **Builder**: `build_md_card(text, title=None, color="blue")`
-**特殊变体**: `build_thinking_card()` → 无标题，内容"⏳ 思考中..."
+**特殊变体**: `build_thinking_card()` → 无标题，内容"⏳ 思考中..."，用于 AI 处理期间的占位消息（PATCH 替换）
 **用途**: AI 对话回复、错误提示、占位消息、各命令纯文本响应
-**结构**: 可选 header（title+color） + 单个 lark_md div
+**结构**: 可选 header（title+color） + 单个 `{"tag":"markdown"}` 元素，支持完整 Markdown（##标题、表格、代码块）
+**无交互按钮**
 
 ---
 
-### 卡片 2：AI 信息提取确认卡片（知识库条目）
-**Builder**: `_build_confirm_card(items, chat_id, saved_count=0)`
-**Sender**: `send_confirm_card(chat_id, items, app_id, app_secret)`
-**Header颜色**: blue（初始）→ green（有已保存条目时）
-**Header文字**: "💡 发现可更新/记录信息" / "💡 发现可记录信息" → "💡 已保存 N 条，还剩 N 条"
-**每行内容**: `[类型标签] 内容预览（≤55字）\n→ 新增条目 / → 追加到 #ID《标题》`
-**每行按钮**: "新增"（primary）/ "追加 #ID"（default）
-**底部按钮**: "✓ 全部保存"（primary）、"✗ 跳过"（danger）
-**Action值**:
-- 逐条: `{action:"save_one", chat_id, index, saved_count}`（路由：`_handle_card_trigger` 的 save_one 分支）
-- 全部: `{action:"save_all", chat_id, saved_count}`
-- 跳过: `{action:"skip", chat_id}`
-**响应函数**: `card_saved_response(count)`、`card_one_saved_response(saved, remaining, chat_id, saved_count)`、`card_skipped_response()`
+### 卡片 2：AI 建议确认卡片（v0.9.0 统一入口）
+**Builder**: `build_ai_suggestions_card(items, chat_id)`
+**发送**: `_send_ai_suggestions_card(chat_id, suggestions)` → 先 `save_pending_commands`，再 `send_reply`
+**触发时机**: AI 主回复中解析到 `===SUGGESTIONS===` 块，或 `/admin fact decompose` AI 分解风险后
+**Header**: "💡 AI 建议（N 项）" → "💡 AI 建议（已处理 P/N）" → "✅ AI 建议处理完毕（保存 S · 跳过 K）"（blue→green）
+**分组展示**（5 组，无内容的组不显示）:
+- ⚠️ 风险 / 问题：kind=new_fact，type∈{risk,issue,blocker,dependency}
+- 📅 里程碑：kind=new_fact，type=milestone
+- 📋 知识 / 决策 / 信息：kind=new_fact，其余 type
+- ☐ 待办事项：kind=new_todo
+- ✏️ 更新建议：kind∈{update_fact,update_todo}
+**每行内容**: `[类型] 标题 ✅/⏭\n优先级 负责人 截止`；update 类型显示 `字段：旧值→新值`
+**每行按钮**: "详情"（default）→ `{action:"suggestion_view_detail", chat_id, index}`
+**底部按钮**: "全部保存"（primary）、"全部跳过"（danger）
+**Action 值**（两类路由均支持）:
+- `suggestion_view_detail` → 原地切换为卡片 3 详情
+- `suggestion_back_to_list` → 原地切换回本卡片
+- `suggestion_save_one` / `suggestion_skip_one` → `{chat_id, index}`
+- `suggestion_save_all` / `suggestion_skip_all` → `{chat_id}`
+**执行逻辑**: `_save_suggestion_item(item)` → new_fact→`add_fact`；new_todo→`add_todo`；update_fact→`update_fact`；update_todo→`update_todo`
+**文字确认兼容**: 发"保存/确认"等关键词也会执行所有 pending suggestions
 
 ---
 
-### 卡片 3：待办确认卡片
-**Builder**: `build_todo_confirm_card(todos, chat_id, saved_count=0)`
-**Sender**: `send_todo_confirm_card(chat_id, todos, app_id, app_secret)`
-**Header颜色**: blue → green
-**Header文字**: "📋 建议新增 N 条待办" → "✅ 已新增 N 条，还剩 N 条"
-**每行内容**: `N. 标题\n优先级：X  截止：Y  负责人：Z`
-**每行按钮**: "新增"（primary）
-**底部按钮**: "✓ 全部新增"（primary）、"✗ 跳过"（danger）
-**Action值**:
-- 逐条: `{action:"save_todo_one", chat_id, index, saved_count}`
-- 全部: `{action:"save_todo_all", chat_id, saved_count}`
-- 跳过: `{action:"skip_todos", chat_id}`
-**响应函数**: `card_todo_saved_response(count)`、`card_todo_one_saved_response(title, remaining, chat_id, saved_count)`、`card_todo_skipped_response()`
+### 卡片 3：AI 建议详情卡片
+**Builder**: `build_suggestion_detail_card(item, chat_id, index)`
+**触发方式**: 卡片 2 点击"详情" → `suggestion_view_detail` → 原地更新
+**Header**: "新增 [类型] 标题"（blue）/ "新增待办：标题"（blue）/ "更新 #ID 标题"（yellow）
+**内容**: 完整元信息（操作类型/类型/优先级/负责人/截止/正文 或 字段旧→新值/原因）
+**按钮**（未处理时）: "返回清单"（default）、"保存"（primary）、"跳过"（danger）
+**按钮**（已处理时）: "返回清单"（default）、"已保存"或"已跳过"（default，仅提示）
+**Action 值**: `suggestion_save_one` / `suggestion_skip_one` / `suggestion_back_to_list`
 
 ---
 
 ### 卡片 4：注册审批卡片
 **Builder**: `build_approval_card(open_id, name, role, project)`
-**Sender**: `send_card_to_user(open_id, card, ...)` 向所有 ADMIN_OPEN_IDS 发送
+**Sender**: `send_card_to_user(open_id, card, ...)` 向所有 ADMIN_OPEN_IDS 逐一发送
 **Header**: "📋 新用户注册申请"（blue）
 **Fields（两列）**: 申请人、申请角色、申请项目、open_id
 **按钮**: "✅ 批准"（primary）、"❌ 拒绝"（danger）
-**Action值（card.action.trigger）**:
+**Action 值（card.action.trigger）**:
 - 批准: `{action:"approve_user", open_id, name, role, project}`
 - 拒绝: `{action:"reject_user", open_id, name}`
 **幂等处理**: 已 active 用户批准时返回 info toast；已处理申请拒绝时同样提示
@@ -594,104 +600,111 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 ### 卡片 5：AI 合并建议确认卡片
 **Builder**: `build_merge_confirm_card(merges, chat_id, saved_count=0)`
 **Sender**: `send_merge_confirm_card(chat_id, merges, app_id, app_secret)`
-**Header颜色**: blue → green
-**Header文字**: "🔀 建议合并 N 组信息" → "✅ 已合并 N 组，还剩 N 组"
+**触发时机**: AI 洗盘报告中解析到 `===MERGE_CANDIDATES_JSON===` 块
+**Header**: "🔀 建议合并 N 组信息" → "✅ 已合并 N 组，还剩 N 组"（blue→green）
 **每行内容**: `N. 合并到 #keep_id\n合入：#id1,#id2\n原因：xxx\n追加：预览文字`
 **每行按钮**: "合并"（primary）
 **底部按钮**: "✓ 全部合并"（primary）、"✗ 跳过"（danger）
-**Action值**:
-- 逐条: `{action:"merge_one", chat_id, index, saved_count}`
-- 全部: `{action:"merge_all", chat_id, saved_count}`
-- 跳过: `{action:"skip_merges", chat_id}`
-**响应函数**: `card_merge_saved_response(count)`、`card_merge_one_saved_response(item, remaining, chat_id, saved_count)`、`card_merge_skipped_response()`
-**执行逻辑**: `_apply_merge_item` → `append_to_fact(keep_id, ...)` + archive 被合入条目
+**Action 值**:
+- `merge_one`：`{chat_id, index, saved_count}` → `pop_pending_merge` + `_apply_merge_item`
+- `merge_all`：`{chat_id, saved_count}` → 批量执行
+- `skip_merges`：`{chat_id}` → `clear_pending_merges`
+**执行逻辑**: `_apply_merge_item` → `append_to_fact(keep_id, ...)` + 被合入条目 status→archived
 
 ---
 
 ### 卡片 6：风险/待办清洗动作确认卡片
 **Builder**: `build_action_confirm_card(actions, chat_id, saved_count=0)`
 **Sender**: `send_action_confirm_card(chat_id, actions, app_id, app_secret)`
-**Header颜色**: blue → green
-**Header文字**: "⚙️ 建议处理 N 项风险/待办" → "✅ 已处理 N 项，还剩 N 项"
+**触发时机**: AI 洗盘报告中解析到 `===ACTION_CANDIDATES_JSON===` 块
+**Header**: "⚙️ 建议处理 N 项风险/待办" → "✅ 已处理 N 项，还剩 N 项"（blue→green）
 **每行内容**: `N. [操作标签] [类型标签]#ID 标题\n原因：xxx`
-**支持 kind+action 类型**: `("risk","close")`→关闭风险、`("fact","archive")`→归档信息、`("todo","done")`→完成待办、`("todo","cancel")`→取消待办
+**支持 kind+action 组合**: `(risk,close)`→关闭风险、`(fact,archive)`→归档信息、`(todo,done)`→完成待办、`(todo,cancel)`→取消待办
 **每行按钮**: 操作标签前4字（primary）
 **底部按钮**: "✓ 全部处理"（primary）、"✗ 跳过"（danger）
-**Action值**:
-- 逐条: `{action:"review_action_one", chat_id, index, saved_count}`
-- 全部: `{action:"review_action_all", chat_id, saved_count}`
-- 跳过: `{action:"skip_review_actions", chat_id}`
-**响应函数**: `card_action_saved_response(count)`、`card_action_one_saved_response(item, remaining, chat_id, saved_count)`、`card_action_skipped_response()`
+**Action 值**:
+- `review_action_one`：`{chat_id, index, saved_count}` → `pop_pending_action` + `_apply_review_action`
+- `review_action_all`：`{chat_id, saved_count}`
+- `skip_review_actions`：`{chat_id}` → `clear_pending_actions`
+**执行逻辑**: `_apply_review_action` → risk.close→`update_risk(status="closed")`；fact.archive→`update_fact(status="archived")`；todo.done/cancel→`update_todo(status=...)`
 
 ---
 
-### 卡片 7：风险列表卡片
+### 卡片 7：通用 Fact 详情卡片
+**Builder**: `build_fact_show_card(fact)`
+**触发方式**: `view_fact_detail` action → `{action:"view_fact_detail", id}` → 原地更新
+**Header**: "#{id} {title}"（blue）
+**内容**: 类型、状态、优先级、负责人、截止、项目、创建/更新时间 + 正文（lark_md）
+**用途**: 通用 fact 详情查看，不限于风险（risk 专属走卡片 9）
+**无操作按钮**（只读）
+
+---
+
+### 卡片 8：风险列表卡片
 **Builder**: `build_risk_list_card(rows, status_filter="open")`
 **Header**: "⚠️ 风险列表（进行中/全部 · N 条）"（red）
 **每行内容**: `**#ID 标题**\n🔴 [类型·优先级]  负责人  截止`
-**每行按钮**: "详情"（default）→ `{action:"view_risk_detail", id}`（card.action.trigger）
-**点击详情**: 原地更新为风险详情卡片（卡片 8）
+**每行按钮**: "详情"（default）→ `{action:"view_risk_detail", id}`
+**点击详情**: 原地更新为卡片 9 风险详情
 
 ---
 
-### 卡片 8：风险详情卡片
+### 卡片 9：风险详情卡片
 **Builder**: `build_risk_show_card(fact, open_todos)`
 **Header**: "#{id} {title}"（red）
-**元信息**: 类型、优先级（带图标）、负责人、截止、记录/更新时间
-**正文区**: fact.body（lark_md）
+**内容**: 类型/优先级（带图标）/负责人/截止/记录更新时间 + 正文（lark_md）
 **关联待办区**（有时）: `关联待办（N 条进行中）\n- 🔴 #T{id} 标题（负责人）`
-**触发方式**: 风险列表卡片点击"详情" → `view_risk_detail` → 原地更新
+**触发方式**: 风险列表点击"详情" → `view_risk_detail` → 原地更新；`/risk show [ID]` 直接发送
 
 ---
 
-### 卡片 9：待办列表卡片
+### 卡片 10：待办列表卡片
 **Builder**: `build_todo_list_card(rows)`
 **Header**: "📋 待办列表（进行中 N / 共 N 条）"（blue）
-**每行内容**: `{状态图标} {优先级图标} **#T{id} 标题**\n负责人 截止 创建 来源关联`
+**每行内容**: `{状态图标} {优先级图标} **#T{id} 标题**\n负责人 截止 创建 ← risk/milestone来源`
 **状态图标**: ☐ open / ☑ done / ☒ cancelled
-**每行按钮**: "详情"（default）→ `{action:"view_todo_detail", id}`（card.action.trigger）
-**点击详情**: 原地更新为待办详情卡片（卡片 10）
+**每行按钮**: "详情"（default）→ `{action:"view_todo_detail", id}`
+**点击详情**: 原地更新为卡片 11 待办详情
 
 ---
 
-### 卡片 10：待办详情卡片
+### 卡片 11：待办详情卡片
 **Builder**: `build_todo_show_card(todo, source_fact, plan_fact)`
 **Header**: "#T{id} {title}"（blue）
-**元信息**: 状态、优先级（带图标）、负责人、截止、创建/更新时间（精确到分钟）
-**可选元信息**: 关联风险 `#{source_fact_id}《标题》`、挂载里程碑 `#{plan_id}《标题》`
-**正文区**（有时）: todo.body（lark_md）
-**触发方式**: 待办列表卡片点击"详情" → `view_todo_detail` → 原地更新
+**内容**: 状态/优先级（带图标）/负责人/截止/创建更新时间（精确到分钟）；可选：关联风险、挂载里程碑；可选正文（lark_md）
+**触发方式**: 待办列表点击"详情" → `view_todo_detail` → 原地更新；`/todo show [ID]` 直接发送
+**无操作按钮**（只读）
 
 ---
 
-### 卡片 11：里程碑列表卡片
+### 卡片 12：里程碑列表卡片
 **Builder**: `build_milestone_list_card(rows)`
 **Header**: "📅 里程碑（进行中 N / 共 N 个）"（green）
-**每行内容**: `{状态图标} **#{id} 标题**\n{逾期⚠️}截止日期  负责人`
-**状态图标**: ✅ resolved / 🔄 active；逾期自动标注 ⚠️
-**无交互按钮**（纯展示）
+**每行内容**: `✅/🔄 **#{id} 标题**\n⚠️逾期/截止日期  负责人`；逾期自动标注 ⚠️
+**无交互按钮**（纯展示）；`/schedule show [ID]` 单独查看详情
 
 ---
 
-### 卡片 12：里程碑详情卡片
+### 卡片 13：里程碑详情卡片
 **Builder**: `build_milestone_show_card(fact, open_todos)`
 **Header**: "📅 #{id} {title}"（green，逾期时用 yellow）
-**元信息**: 状态、截止（逾期提醒）、负责人、记录/更新时间
-**正文区**（有时）: fact.body（lark_md）
-**关联待办区**（有时）: 同卡片 8 格式
+**内容**: 状态/截止（逾期提醒）/负责人/记录更新时间；可选正文（lark_md）；可选关联待办列表
+**触发方式**: `/schedule show [ID]` 直接发送
+**无交互按钮**（只读）
 
 ---
 
-### 卡片 13：AI 澄清问题卡片
+### 卡片 14：AI 澄清问题卡片
 **Builder**: `build_clarify_card(question, opts, chat_id, sender_open_id="")`
+**触发时机**: AI 主回复中解析到 `===CLARIFY===` 块
 **Header**: "需要确认一些信息"（yellow）
-**内容**: `❓ 问题` + 最多4个选项按钮 + "也可以直接发送文字回复"
-**每个选项**: `{action:"clarify_option", text:选项文字, chat_id, sender_open_id}`
-**点击后**: 原地更新为"⏳ 正在整合信息，稍候..."，异步调用 AI 继续作答
+**内容**: `❓ 问题` + 最多4个选项按钮 + "💬 也可以直接发送文字回复"
+**每个选项**: `{action:"clarify_option", text, chat_id, sender_open_id}`
+**点击后**: 原地更新为"⏳ 正在整合信息，稍候..."，`asyncio.create_task(_clarify_and_respond(...))` 异步继续作答
 
 ---
 
-### 卡片 14：早报卡片
+### 卡片 15：早报卡片
 **Builder**: `build_morning_report_card(project_name, risks, review_text, today)`
 **Header**: "📋 {today} {project_name}早报" / "📋 {today} 综合早报"（blue）
 **内容**:
@@ -699,18 +712,43 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - 有风险时: 按 高/中/低 分组列出，格式 `#{id} [类型] 标题（负责人）⏰截止`，末尾显示总数
 - 可选 AI 洗盘摘要（≤800字，超出截断提示"完整报告已存入系统"）
 **发送场景**: APScheduler 09:00 自动触发 / `/admin review run` 手动触发
-**按项目分发**: 全项目卡片→管理员+NOTIFY；各项目单独卡片→对应 PM
+**按项目分发**: 全项目综合卡片→管理员+NOTIFY_OPEN_IDS；各项目单独卡片→对应 PM（不重复发给管理员）
+**无交互按钮**（纯展示）
 
 ---
 
-### 辅助常量（feishu.py 顶部）
+### 辅助常量（feishu.py）
 ```python
 _PRIO_ICON  = {"high":"🔴", "medium":"🟡", "low":"🟢"}
 _PRIO_ZH2   = {"high":"高", "medium":"中", "low":"低"}
 _TYPE_TAG   = {"risk":"风险","issue":"问题","blocker":"阻塞","dependency":"依赖","milestone":"里程碑",...}
-_TYPE_LABELS = {...}  # 用于知识库确认卡片
+_TYPE_LABELS = {same keys}  # 用于 AI 建议卡片类型标签
 _ACTION_LABELS = {("risk","close"):"关闭风险", ("fact","archive"):"归档信息",...}
+_SUGGESTION_SECTIONS = [("risk_fact","⚠️ 风险/问题"),("schedule_fact","📅 里程碑"),...]  # 建议卡片分组
 ```
+
+### 卡片交互汇总表
+
+| action 值 | 触发卡片 | 路由 | 执行逻辑 |
+|-----------|---------|------|---------|
+| `suggestion_view_detail` | AI 建议列表 | 两类均可 | 原地切换为详情卡片 3 |
+| `suggestion_back_to_list` | AI 建议详情 | 两类均可 | 原地切换回列表卡片 2 |
+| `suggestion_save_one` | AI 建议详情/列表 | 两类均可 | `_save_suggestion_item` + 刷新卡片 2 |
+| `suggestion_skip_one` | AI 建议详情/列表 | 两类均可 | 标记 skipped + 刷新卡片 2 |
+| `suggestion_save_all` | AI 建议列表 | 两类均可 | 批量 `_save_suggestion_item` + 刷新卡片 2 |
+| `suggestion_skip_all` | AI 建议列表 | 两类均可 | 全标 skipped + 刷新卡片 2 |
+| `approve_user` | 注册审批卡片 | card_trigger | `update_user(active)` + DM 通知申请人 |
+| `reject_user` | 注册审批卡片 | card_trigger | `update_user(rejected)` + DM 通知申请人 |
+| `merge_one` | 合并建议卡片 | 两类均可 | `_apply_merge_item` + 刷新卡片 5 |
+| `merge_all` | 合并建议卡片 | 两类均可 | 批量合并 |
+| `skip_merges` | 合并建议卡片 | 两类均可 | `clear_pending_merges` |
+| `review_action_one` | 清洗动作卡片 | 两类均可 | `_apply_review_action` + 刷新卡片 6 |
+| `review_action_all` | 清洗动作卡片 | 两类均可 | 批量执行 |
+| `skip_review_actions` | 清洗动作卡片 | 两类均可 | `clear_pending_actions` |
+| `view_risk_detail` | 风险列表卡片 | card_trigger | 原地更新为卡片 9 |
+| `view_todo_detail` | 待办列表卡片 | card_trigger | 原地更新为卡片 11 |
+| `view_fact_detail` | （通用） | card_trigger | 原地更新为卡片 7 |
+| `clarify_option` | 澄清问题卡片 | card_trigger | 原地更新占位 + 异步 AI 继续作答 |
 
 ## 已知坑
 - SSH 登录用 `duyingfang` 而非 `root`
@@ -731,7 +769,7 @@ _ACTION_LABELS = {("risk","close"):"关闭风险", ("fact","archive"):"归档信
 - v0.8.3 已部署（保留待确认状态；文字“保存/确认/跳过”可消费 pending；AI 建议命令转确认按钮后再写库）
 - v0.8.4 已部署（补全 AI 命令集含 risk owner/close/reopen；修复卡片发送失败静默问题，新增 400 响应日志与失败兜底提示）
 - v0.8.5 已部署（新增 AI 执行口吻防误导：无命令时禁止”已确认/已更新/已保存/已执行”语气，统一提示”仅建议未落库”）
-- v0.9.0 本地就绪待部署（AI 建议整合到主回复：取消单独 extract_facts/extract_todo_intent 调用，AI 在回复中内嵌 ===SUGGESTIONS=== 块；统一建议确认卡片 build_ai_suggestions_card，支持分组/详情/按条保存跳过/全部保存跳过；旧 command_*/save_one/save_all/todo 卡片全部清理）
+- v0.9.0 已部署并验证（AI 建议整合到主回复：取消单独 extract_facts/extract_todo_intent 调用，AI 在回复中内嵌 ===SUGGESTIONS=== 块；统一建议确认卡片 build_ai_suggestions_card，支持按类型分组/详情查看/按条保存跳过/全部保存跳过；旧 command_*/save_one/save_all/todo 卡片全部清理；修复 AI 建议块未触发：提示词重构移至末尾并加具体示例，历史记录存 clean 版本避免污染）
 - **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
