@@ -12,7 +12,7 @@
 - 协作风格：直接给可运行代码；说"你决定"时直接选最优方案执行，无需再问
 
 ## 部署信息
-- 服务器：`aliyun.tmhcorps.cn`，用户 `duyingfang`，Ubuntu 24.04
+- 服务器：SSH 配置名 `aliyun`（本地 `~/.ssh/config` 中预设，不同电脑同名指向 Cloudflare Tunnel），用户 `duyingfang`，Ubuntu 24.04
 - 项目目录：`~/pm-assist`（虚拟环境在 `~/pm-assist/venv`）
 - 启动命令：`nohup venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 >> logs/app.log 2>&1 &`
 - 日志：`~/pm-assist/logs/app.log`
@@ -36,9 +36,15 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `0.7.8`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `0.8.1`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
 - 每次部署前修改 `VERSION`，本地 `git tag vX.Y.Z && git push --tags`，scp 时一并上传
+
+## 开发工作流程
+1. 本地修改代码 + 更新 CLAUDE.md（版本号、功能描述、已知坑）
+2. `git commit`（本地提交）
+3. `scp` 推送到服务器，重启服务，飞书测试验证
+4. 测试通过后 `git push` 推送到 GitHub
 
 ## 代码结构
 ```
@@ -365,6 +371,8 @@ key / value / updated_at
 45. **飞书消息统一卡片化**：删除 `_strip_md()`，所有回复走 `send_reply()`/`send_reply_to_user()` 统一出口；AI 回复改为 lark_md 卡片保留 markdown 格式；`/risk list/show`、`/todo list/show` 改为结构化卡片（带颜色 header、优先级图标）（v0.7.8）
 46. **`/schedule` 里程碑命令**：独立命令 `/schedule list [all]`、`/schedule show [ID]`，member/PM/管理员均可用；快捷菜单"查看里程碑"同步换卡片；逾期自动标注 ⚠️（v0.7.8）
 47. **快捷菜单项目查询逻辑统一**：有项目绑定查指定项目，无绑定查全量（对所有角色一致）；修复 PM 无绑定时按钮显示空数据的问题（v0.7.8）
+48. **飞书卡片全面升级 schema 2.0**：所有卡片 builder 添加 `"schema":"2.0"` 并将 `elements` 包进 `body`；AI 回复/文本展示改用 `{"tag":"markdown"}` 元素，支持完整 Markdown（`##` 标题、`|表格|`、代码块）；column 内部保留 `lark_md` 文本；系统提示同步解除 `##` 和表格禁令（v0.8.1）
+49. **"思考中"卡片原地更新修复**：卡片更新改用正确端点 `PATCH /im/v1/messages/{id}`（原 `/body` 子路径仅支持 text/post，不支持 interactive）；schema 2.0 更新时注入 `update_multi: True`；"思考中"占位卡片可被 AI 回复卡片原地替换（v0.8.1）
 
 ## 命令速查
 
@@ -512,6 +520,195 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 
 > 注意：快捷菜单事件无 chat_id，`view_*` 使用发起人的 open_id 作为 chat_id，项目按用户绑定解析（super_admin 无项目绑定时查全量）。
 
+## 飞书卡片模板清单
+
+所有卡片 builder 和响应函数均在 `feishu.py`，card callback 分发在 `main.py` 的 `_handle_card_callback` / `_handle_card_trigger`。
+
+### 通用说明
+- **两类回调路由**：
+  - `card.action.trigger`（飞书新协议）→ `_handle_card_trigger`：审批卡片、详情查看、澄清问题、待办/合并/清洗动作确认
+  - `_handle_card_callback`（旧协议）：知识库确认卡片（save_one/save_all/skip）
+- **回调响应格式**：`{"toast":{"type":"success/info/error","content":"..."}, "card":{"type":"raw","data":{...card body...}}}`
+- **卡片发送**：`send_reply(chat_id, card_dict, ...)` / `send_reply_to_user(open_id, card_dict, ...)` 接受 dict 直接发 interactive；短文本走 text；长文本自动包成 `build_md_card`
+
+---
+
+### 卡片 1：通用 lark_md 卡片
+**Builder**: `build_md_card(text, title=None, color="blue")`
+**特殊变体**: `build_thinking_card()` → 无标题，内容"⏳ 思考中..."
+**用途**: AI 对话回复、错误提示、占位消息、各命令纯文本响应
+**结构**: 可选 header（title+color） + 单个 lark_md div
+
+---
+
+### 卡片 2：AI 信息提取确认卡片（知识库条目）
+**Builder**: `_build_confirm_card(items, chat_id, saved_count=0)`
+**Sender**: `send_confirm_card(chat_id, items, app_id, app_secret)`
+**Header颜色**: blue（初始）→ green（有已保存条目时）
+**Header文字**: "💡 发现可更新/记录信息" / "💡 发现可记录信息" → "💡 已保存 N 条，还剩 N 条"
+**每行内容**: `[类型标签] 内容预览（≤55字）\n→ 新增条目 / → 追加到 #ID《标题》`
+**每行按钮**: "新增"（primary）/ "追加 #ID"（default）
+**底部按钮**: "✓ 全部保存"（primary）、"✗ 跳过"（danger）
+**Action值**:
+- 逐条: `{action:"save_one", chat_id, index, saved_count}`（路由：`_handle_card_trigger` 的 save_one 分支）
+- 全部: `{action:"save_all", chat_id, saved_count}`
+- 跳过: `{action:"skip", chat_id}`
+**响应函数**: `card_saved_response(count)`、`card_one_saved_response(saved, remaining, chat_id, saved_count)`、`card_skipped_response()`
+
+---
+
+### 卡片 3：待办确认卡片
+**Builder**: `build_todo_confirm_card(todos, chat_id, saved_count=0)`
+**Sender**: `send_todo_confirm_card(chat_id, todos, app_id, app_secret)`
+**Header颜色**: blue → green
+**Header文字**: "📋 建议新增 N 条待办" → "✅ 已新增 N 条，还剩 N 条"
+**每行内容**: `N. 标题\n优先级：X  截止：Y  负责人：Z`
+**每行按钮**: "新增"（primary）
+**底部按钮**: "✓ 全部新增"（primary）、"✗ 跳过"（danger）
+**Action值**:
+- 逐条: `{action:"save_todo_one", chat_id, index, saved_count}`
+- 全部: `{action:"save_todo_all", chat_id, saved_count}`
+- 跳过: `{action:"skip_todos", chat_id}`
+**响应函数**: `card_todo_saved_response(count)`、`card_todo_one_saved_response(title, remaining, chat_id, saved_count)`、`card_todo_skipped_response()`
+
+---
+
+### 卡片 4：注册审批卡片
+**Builder**: `build_approval_card(open_id, name, role, project)`
+**Sender**: `send_card_to_user(open_id, card, ...)` 向所有 ADMIN_OPEN_IDS 发送
+**Header**: "📋 新用户注册申请"（blue）
+**Fields（两列）**: 申请人、申请角色、申请项目、open_id
+**按钮**: "✅ 批准"（primary）、"❌ 拒绝"（danger）
+**Action值（card.action.trigger）**:
+- 批准: `{action:"approve_user", open_id, name, role, project}`
+- 拒绝: `{action:"reject_user", open_id, name}`
+**幂等处理**: 已 active 用户批准时返回 info toast；已处理申请拒绝时同样提示
+**响应函数**: `card_approved_response(name, role, project)`、`card_rejected_response(name)`
+**审批后副作用**: 向申请人发 DM 通知（`send_reply_to_user`）
+
+---
+
+### 卡片 5：AI 合并建议确认卡片
+**Builder**: `build_merge_confirm_card(merges, chat_id, saved_count=0)`
+**Sender**: `send_merge_confirm_card(chat_id, merges, app_id, app_secret)`
+**Header颜色**: blue → green
+**Header文字**: "🔀 建议合并 N 组信息" → "✅ 已合并 N 组，还剩 N 组"
+**每行内容**: `N. 合并到 #keep_id\n合入：#id1,#id2\n原因：xxx\n追加：预览文字`
+**每行按钮**: "合并"（primary）
+**底部按钮**: "✓ 全部合并"（primary）、"✗ 跳过"（danger）
+**Action值**:
+- 逐条: `{action:"merge_one", chat_id, index, saved_count}`
+- 全部: `{action:"merge_all", chat_id, saved_count}`
+- 跳过: `{action:"skip_merges", chat_id}`
+**响应函数**: `card_merge_saved_response(count)`、`card_merge_one_saved_response(item, remaining, chat_id, saved_count)`、`card_merge_skipped_response()`
+**执行逻辑**: `_apply_merge_item` → `append_to_fact(keep_id, ...)` + archive 被合入条目
+
+---
+
+### 卡片 6：风险/待办清洗动作确认卡片
+**Builder**: `build_action_confirm_card(actions, chat_id, saved_count=0)`
+**Sender**: `send_action_confirm_card(chat_id, actions, app_id, app_secret)`
+**Header颜色**: blue → green
+**Header文字**: "⚙️ 建议处理 N 项风险/待办" → "✅ 已处理 N 项，还剩 N 项"
+**每行内容**: `N. [操作标签] [类型标签]#ID 标题\n原因：xxx`
+**支持 kind+action 类型**: `("risk","close")`→关闭风险、`("fact","archive")`→归档信息、`("todo","done")`→完成待办、`("todo","cancel")`→取消待办
+**每行按钮**: 操作标签前4字（primary）
+**底部按钮**: "✓ 全部处理"（primary）、"✗ 跳过"（danger）
+**Action值**:
+- 逐条: `{action:"review_action_one", chat_id, index, saved_count}`
+- 全部: `{action:"review_action_all", chat_id, saved_count}`
+- 跳过: `{action:"skip_review_actions", chat_id}`
+**响应函数**: `card_action_saved_response(count)`、`card_action_one_saved_response(item, remaining, chat_id, saved_count)`、`card_action_skipped_response()`
+
+---
+
+### 卡片 7：风险列表卡片
+**Builder**: `build_risk_list_card(rows, status_filter="open")`
+**Header**: "⚠️ 风险列表（进行中/全部 · N 条）"（red）
+**每行内容**: `**#ID 标题**\n🔴 [类型·优先级]  负责人  截止`
+**每行按钮**: "详情"（default）→ `{action:"view_risk_detail", id}`（card.action.trigger）
+**点击详情**: 原地更新为风险详情卡片（卡片 8）
+
+---
+
+### 卡片 8：风险详情卡片
+**Builder**: `build_risk_show_card(fact, open_todos)`
+**Header**: "#{id} {title}"（red）
+**元信息**: 类型、优先级（带图标）、负责人、截止、记录/更新时间
+**正文区**: fact.body（lark_md）
+**关联待办区**（有时）: `关联待办（N 条进行中）\n- 🔴 #T{id} 标题（负责人）`
+**触发方式**: 风险列表卡片点击"详情" → `view_risk_detail` → 原地更新
+
+---
+
+### 卡片 9：待办列表卡片
+**Builder**: `build_todo_list_card(rows)`
+**Header**: "📋 待办列表（进行中 N / 共 N 条）"（blue）
+**每行内容**: `{状态图标} {优先级图标} **#T{id} 标题**\n负责人 截止 创建 来源关联`
+**状态图标**: ☐ open / ☑ done / ☒ cancelled
+**每行按钮**: "详情"（default）→ `{action:"view_todo_detail", id}`（card.action.trigger）
+**点击详情**: 原地更新为待办详情卡片（卡片 10）
+
+---
+
+### 卡片 10：待办详情卡片
+**Builder**: `build_todo_show_card(todo, source_fact, plan_fact)`
+**Header**: "#T{id} {title}"（blue）
+**元信息**: 状态、优先级（带图标）、负责人、截止、创建/更新时间（精确到分钟）
+**可选元信息**: 关联风险 `#{source_fact_id}《标题》`、挂载里程碑 `#{plan_id}《标题》`
+**正文区**（有时）: todo.body（lark_md）
+**触发方式**: 待办列表卡片点击"详情" → `view_todo_detail` → 原地更新
+
+---
+
+### 卡片 11：里程碑列表卡片
+**Builder**: `build_milestone_list_card(rows)`
+**Header**: "📅 里程碑（进行中 N / 共 N 个）"（green）
+**每行内容**: `{状态图标} **#{id} 标题**\n{逾期⚠️}截止日期  负责人`
+**状态图标**: ✅ resolved / 🔄 active；逾期自动标注 ⚠️
+**无交互按钮**（纯展示）
+
+---
+
+### 卡片 12：里程碑详情卡片
+**Builder**: `build_milestone_show_card(fact, open_todos)`
+**Header**: "📅 #{id} {title}"（green，逾期时用 yellow）
+**元信息**: 状态、截止（逾期提醒）、负责人、记录/更新时间
+**正文区**（有时）: fact.body（lark_md）
+**关联待办区**（有时）: 同卡片 8 格式
+
+---
+
+### 卡片 13：AI 澄清问题卡片
+**Builder**: `build_clarify_card(question, opts, chat_id, sender_open_id="")`
+**Header**: "需要确认一些信息"（yellow）
+**内容**: `❓ 问题` + 最多4个选项按钮 + "也可以直接发送文字回复"
+**每个选项**: `{action:"clarify_option", text:选项文字, chat_id, sender_open_id}`
+**点击后**: 原地更新为"⏳ 正在整合信息，稍候..."，异步调用 AI 继续作答
+
+---
+
+### 卡片 14：早报卡片
+**Builder**: `build_morning_report_card(project_name, risks, review_text, today)`
+**Header**: "📋 {today} {project_name}早报" / "📋 {today} 综合早报"（blue）
+**内容**:
+- 无风险时: "✅ 当前无待处理风险/问题"
+- 有风险时: 按 高/中/低 分组列出，格式 `#{id} [类型] 标题（负责人）⏰截止`，末尾显示总数
+- 可选 AI 洗盘摘要（≤800字，超出截断提示"完整报告已存入系统"）
+**发送场景**: APScheduler 09:00 自动触发 / `/admin review run` 手动触发
+**按项目分发**: 全项目卡片→管理员+NOTIFY；各项目单独卡片→对应 PM
+
+---
+
+### 辅助常量（feishu.py 顶部）
+```python
+_PRIO_ICON  = {"high":"🔴", "medium":"🟡", "low":"🟢"}
+_PRIO_ZH2   = {"high":"高", "medium":"中", "low":"低"}
+_TYPE_TAG   = {"risk":"风险","issue":"问题","blocker":"阻塞","dependency":"依赖","milestone":"里程碑",...}
+_TYPE_LABELS = {...}  # 用于知识库确认卡片
+_ACTION_LABELS = {("risk","close"):"关闭风险", ("fact","archive"):"归档信息",...}
+```
+
 ## 已知坑
 - SSH 登录用 `duyingfang` 而非 `root`
 - `aliyun.tmhcorps.cn` DNS 须设为"仅DNS"（灰云），否则 SSH 被 Cloudflare 拦截
@@ -519,11 +716,14 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - APScheduler 的定时任务在服务重启后重新注册，若服务在 09:00 后重启，当天洗盘+早报会跳过（次日才补跑）
 - AI 洗盘 `direct_cleanup` 只执行报告中带 `[AUTO]` 前缀的低风险 facts 命令；请先用 `/admin review run report` 观察建议质量；目前不会直接清洗 todos
 - Web 后台概览页可切换洗盘模式，但没有单独登录认证，仍按内部工具处理
+- 飞书更新卡片消息：必须用 `PATCH /im/v1/messages/{id}`（不带 `/body`），`/body` 子路径只支持 text/post，不支持 interactive；schema 2.0 卡片更新时 config 中须加 `"update_multi": true`
 
 ## 服务器当前状态
 - v0.7.6 已部署（飞书快捷菜单 + /risk 独立命令 + 移除 PRIMARY_ADMIN_OPEN_ID）
 - v0.7.7 已部署（/risk show + /todo show/update + approve/reject 通知幂等 + member 权限收敛 + TTL 延长至30分钟 + 帮助文本完整化）
 - v0.7.8 已部署（飞书消息全卡片化 + /schedule 里程碑命令 + 删除 _strip_md）
+- v0.8.0 已部署（按项目早报卡片+PM推送、风险/待办列表可点击详情、AI标题加粗渲染修复、AI澄清问题卡片）
+- v0.8.1 本地就绪待部署（飞书卡片全面升级 schema 2.0；"思考中"卡片原地更新修复：PATCH 端点从 /body 改为正确的 /messages/{id}，注入 update_multi:true）
 - **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）

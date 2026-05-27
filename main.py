@@ -230,6 +230,29 @@ def _extract_action_candidates(report: str) -> list[dict]:
     return candidates[:10]
 
 
+def _extract_clarify(text: str) -> dict | None:
+    """从 AI 回复中解析 ===CLARIFY=== 块，返回 {q, opts} 或 None。"""
+    start = text.find("===CLARIFY===")
+    end   = text.find("===END_CLARIFY===")
+    if start < 0 or end < 0 or end <= start:
+        return None
+    raw = text[start + len("===CLARIFY==="):end].strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        log.warning("failed to parse CLARIFY JSON: %r", raw[:200])
+        return None
+
+
+def _strip_clarify(text: str) -> str:
+    """从 AI 回复中剔除 ===CLARIFY=== 块。"""
+    start = text.find("===CLARIFY===")
+    end   = text.find("===END_CLARIFY===")
+    if start >= 0 and end > start:
+        text = (text[:start] + text[end + len("===END_CLARIFY==="):]).strip()
+    return text
+
+
 def _strip_merge_candidates_json(report: str) -> str:
     for start_marker, end_marker in (
         ("===MERGE_CANDIDATES_JSON===", "===END_MERGE_CANDIDATES_JSON==="),
@@ -302,21 +325,37 @@ async def _send_action_candidates_card(chat_id: str, report: str):
 
 async def _morning_review_and_report():
     """每天09:00：先执行AI洗盘，再发送风险日报 + 洗盘报告给所有收件人。
-    收件人 = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS。
+    - 管理员/NOTIFY：发全项目综合卡片（含AI洗盘摘要）
+    - PM用户：发其所属项目的专属卡片（不含洗盘报告）
     注意：如果同时开了 crontab 跑 notify.py，主管理员会收到两次，二选一即可。
     """
     from config import NOTIFY_OPEN_IDS
     try:
         report = await _build_and_save_review()
         review_text = _strip_merge_candidates_json(report) if report else None
-        recipients = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS
-        if not recipients:
+
+        # 按项目生成卡片
+        project_cards = _notify.get_morning_cards(review_text)
+
+        # 管理员 + NOTIFY 接全量卡片
+        admin_recipients = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS
+        if not admin_recipients:
             log.warning("no recipients configured (ADMIN_OPEN_IDS and NOTIFY_OPEN_IDS both empty)")
-            return
-        morning_report = _notify.build_morning_report(review_text)
-        for uid in recipients:
-            await feishu.send_reply_to_user(uid, morning_report, FEISHU_APP_ID, FEISHU_APP_SECRET)
-        log.info("morning report sent to %d recipients: %s", len(recipients), recipients)
+        for uid in admin_recipients:
+            await feishu.send_reply_to_user(uid, project_cards[None], FEISHU_APP_ID, FEISHU_APP_SECRET)
+
+        # PM 用户：只收自己项目的卡片（且不重复发给已在 admin_recipients 的人）
+        pm_users = db.list_users(role="pm", status="active")
+        for user in pm_users:
+            uid = user.get("open_id", "")
+            proj = user.get("project", "")
+            if not uid or uid in admin_recipients:
+                continue
+            card = project_cards.get(proj, project_cards[None])
+            await feishu.send_reply_to_user(uid, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+
+        log.info("morning report sent: %d admins/notify + %d PMs",
+                 len(admin_recipients), len(pm_users))
     except Exception:
         log.exception("morning review and report error")
 
@@ -600,9 +639,10 @@ async def _handle_card_trigger(event: dict) -> dict:
                 return {
                     "toast": {"type": "info", "content": "已由其他管理员审批通过"},
                     "card": {"type": "raw", "data": {
+                        "schema": "2.0",
                         "config": {"enable_forward": False},
-                        "elements": [{"tag": "div", "text": {"tag": "lark_md",
-                                      "content": f"✅ {name} 已审批通过（重复操作已忽略）"}}],
+                        "body": {"elements": [{"tag": "markdown",
+                                               "content": f"✅ {name} 已审批通过（重复操作已忽略）"}]},
                     }},
                 }
             db.update_user(open_id, role=role, project=project, status="active")
@@ -624,9 +664,10 @@ async def _handle_card_trigger(event: dict) -> dict:
                 return {
                     "toast": {"type": "info", "content": "该申请已处理"},
                     "card": {"type": "raw", "data": {
+                        "schema": "2.0",
                         "config": {"enable_forward": False},
-                        "elements": [{"tag": "div", "text": {"tag": "lark_md",
-                                      "content": f"该申请已处理（重复操作已忽略）"}}],
+                        "body": {"elements": [{"tag": "markdown",
+                                               "content": "该申请已处理（重复操作已忽略）"}]},
                     }},
                 }
             db.update_user(open_id, status="rejected")
@@ -664,6 +705,50 @@ async def _handle_card_trigger(event: dict) -> dict:
         if action == "skip_review_actions":
             db.clear_pending_actions(chat_id)
             return feishu.card_action_skipped_response()
+
+        # ── AI 澄清问题选项点击 ──
+        if action == "clarify_option":
+            option_text  = value.get("text", "")
+            chat_id      = value.get("chat_id", "")
+            sender_oid   = value.get("sender_open_id", "")
+            if not option_text or not chat_id:
+                return feishu.card_skipped_response()
+            db.clear_pending_clarify(chat_id)
+            db.add_message(chat_id, "user", option_text)
+            user = db.get_user(sender_oid) or {}
+            project = _resolve_project(chat_id, user)
+            asyncio.create_task(_clarify_and_respond(
+                chat_id, sender_oid, user, project, option_text
+            ))
+            return {
+                "toast": {"type": "info", "content": f"已选择：{option_text[:20]}"},
+                "card": {"type": "raw", "data": feishu.build_md_card("⏳ 正在整合信息，稍候...")},
+            }
+
+        # ── 风险/待办详情查看 ──
+        if action == "view_risk_detail":
+            rid = int(value.get("id", 0))
+            fact = db.get_fact(rid)
+            if not fact or fact.get("dimension") != "risk":
+                return {"toast": {"type": "error", "content": "找不到该条目"},
+                        "card": {"type": "raw", "data": feishu.build_md_card("找不到该条目")}}
+            open_todos = db.list_todos(status="open", source_fact_id=rid)
+            detail = feishu.build_risk_show_card(dict(fact), [dict(t) for t in open_todos])
+            return {"toast": {"type": "info", "content": f"已加载 #{rid} 详情"},
+                    "card": {"type": "raw", "data": detail}}
+
+        if action == "view_todo_detail":
+            tid = int(value.get("id", 0))
+            todo = db.get_todo(tid)
+            if not todo:
+                return {"toast": {"type": "error", "content": "找不到该待办"},
+                        "card": {"type": "raw", "data": feishu.build_md_card("找不到该待办")}}
+            todo = dict(todo)
+            src = db.get_fact(todo["source_fact_id"]) if todo.get("source_fact_id") else None
+            plan = db.get_fact(todo["plan_id"]) if todo.get("plan_id") else None
+            detail = feishu.build_todo_show_card(todo, dict(src) if src else None, dict(plan) if plan else None)
+            return {"toast": {"type": "info", "content": f"已加载 #T{tid} 详情"},
+                    "card": {"type": "raw", "data": detail}}
 
         # ── 知识库确认卡片 ──
         if action == "save_one":
@@ -1006,6 +1091,14 @@ async def _handle_message(event: dict):
     db.clear_pending(chat_id)
     db.clear_pending_todos(chat_id)
 
+    # 若有待处理澄清问题，把上下文拼入用户消息，然后清除
+    pending_clarify = db.get_pending_clarify(chat_id)
+    if pending_clarify:
+        db.clear_pending_clarify(chat_id)
+        clarify_ctx = pending_clarify.get("context", "")
+        if clarify_ctx:
+            text = f"[补充信息：{text}]（关于之前的问题：{clarify_ctx}）"
+
     db.add_message(chat_id, "user", text)
     history = db.get_history(chat_id, MAX_HISTORY)
     context = db.get_full_context(project)
@@ -1033,17 +1126,33 @@ async def _handle_message(event: dict):
         reply = "AI 响应出错，请稍后重试。"
         log.exception("AI chat error chat_id=%s", chat_id)
 
-    db.add_message(chat_id, "assistant", reply)
+    # 检查 AI 是否附带了澄清问题
+    clarify_data = _extract_clarify(reply)
+    clean_reply  = _strip_clarify(reply)
 
-    # 用实际回复卡片更新占位消息（lark_md 渲染，保留 markdown 格式）
-    reply_card = feishu.build_md_card(reply)
+    db.add_message(chat_id, "assistant", clean_reply)
+
+    # 用实际回复卡片原地更新占位消息
+    reply_card = feishu.build_md_card(clean_reply)
     if msg_id:
         updated = await feishu.update_message_card(msg_id, reply_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
         if not updated:
-            log.warning("PATCH card failed, falling back to new card chat_id=%s msg_id=%s", chat_id, msg_id)
+            log.warning("update card failed, sending new card chat_id=%s msg_id=%s", chat_id, msg_id)
             await feishu.send_reply(chat_id, reply_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
     else:
         await feishu.send_reply(chat_id, reply_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+
+    # 如果 AI 附带了澄清问题，额外发送问题卡片并记录待处理状态
+    if clarify_data and user_role in ("pm", "super_admin"):
+        question = clarify_data.get("q", "")
+        opts     = clarify_data.get("opts", [])
+        if question:
+            db.save_pending_clarify(chat_id, question, context=text)
+            clarify_card = feishu.build_clarify_card(
+                question, opts, chat_id, sender_open_id=sender_open_id
+            )
+            await feishu.send_reply(chat_id, clarify_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+            log.info("clarify card sent chat_id=%s question=%r", chat_id, question[:60])
 
     # 仅 PM 和管理员触发信息提取卡片 + 待办意图提取
     if user_role in ("pm", "super_admin"):
@@ -1147,6 +1256,25 @@ def _handle_leave(sender_open_id: str, user: dict) -> str:
     return (f"✅ 已退出项目「{project}」。\n"
             f"角色已变更为普通成员，AI 对话仍可继续使用。\n"
             f"如需加入新项目，发 /start 查看可用项目列表。")
+
+
+async def _clarify_and_respond(chat_id: str, sender_oid: str, user: dict,
+                               project: str, user_text: str):
+    """用户回答了澄清问题后，重新调用 AI 并发送结果。"""
+    try:
+        history = db.get_history(chat_id, MAX_HISTORY)
+        context = db.get_full_context(project)
+        sender_info = _sender_info(user)
+        role = user.get("role", "pm")
+        reply = await asyncio.wait_for(
+            claude_client.chat(history, context, sender_info=sender_info, role=role),
+            timeout=60.0,
+        )
+        reply = _strip_clarify(reply)
+        db.add_message(chat_id, "assistant", reply)
+        await feishu.send_reply(chat_id, feishu.build_md_card(reply), FEISHU_APP_ID, FEISHU_APP_SECRET)
+    except Exception:
+        log.exception("_clarify_and_respond error chat_id=%s", chat_id)
 
 
 async def _extract_and_card(chat_id: str, text: str, project: str = "默认"):

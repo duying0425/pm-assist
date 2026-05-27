@@ -20,24 +20,26 @@ from config import ADMIN_OPEN_IDS, NOTIFY_OPEN_IDS, FEISHU_APP_ID, FEISHU_APP_SE
 _TYPE_ZH = {"risk": "风险", "issue": "问题", "blocker": "阻塞项", "dependency": "依赖"}
 
 
-def build_risk_section() -> str:
+def build_risk_section(project: str | None = None) -> str:
+    """纯文本风险摘要（兼容旧接口，早报改用 build_morning_report_card）。"""
     db.init_db()
-    risks = db.list_risks(status="open")
+    risks = db.list_risks(status="open", project=project)
     today = datetime.now().strftime("%m月%d日")
+    label = f"【{project}】" if project else ""
 
     if not risks:
-        return f"📋 {today} 日报\n\n当前无未关闭风险/问题 ✅"
+        return f"📋 {today} {label}日报\n\n当前无未关闭风险/问题 ✅"
 
-    high = [r for r in risks if r["priority"] == "high"]
+    high   = [r for r in risks if r["priority"] == "high"]
     medium = [r for r in risks if r["priority"] == "medium"]
-    low = [r for r in risks if r["priority"] == "low"]
+    low    = [r for r in risks if r["priority"] == "low"]
 
-    lines = [f"📋 {today} 风险与问题日报\n"]
+    lines = [f"📋 {today} {label}风险与问题日报\n"]
 
     def fmt(r):
-        typ = _TYPE_ZH.get(r["type"], r["type"])
+        typ   = _TYPE_ZH.get(r["type"], r["type"])
         owner = f"（{r['owner']}）" if r["owner"] else ""
-        due = f" ⏰{r['due_date']}" if r["due_date"] else ""
+        due   = f" ⏰{r['due_date']}" if r["due_date"] else ""
         return f"  #{r['id']} [{typ}] {r['title']}{owner}{due}"
 
     if high:
@@ -55,12 +57,33 @@ def build_risk_section() -> str:
 
 
 def build_morning_report(review: str | None = None) -> str:
-    """组合风险摘要 + AI洗盘决策报告。"""
+    """组合风险摘要 + AI洗盘决策报告（兼容旧接口）。"""
     parts = [build_risk_section()]
     if review:
         divider = "─" * 24
         parts.append(f"\n\n🤖 AI数据洗盘·决策报告\n{divider}\n{review}")
     return "".join(parts)
+
+
+def get_morning_cards(review_text: str | None = None) -> dict[str | None, dict]:
+    """返回各项目的早报卡片 dict，key=project_name（None=全项目）。
+    全项目卡片给管理员/notify用户；各项目卡片给对应 PM 用户。
+    """
+    today = datetime.now().strftime("%m月%d日")
+    projects = db.list_projects(active_only=True)
+    cards: dict[str | None, dict] = {}
+
+    # 全项目卡片（admin/notify 收件人）
+    all_risks = db.list_risks(status="open")
+    cards[None] = feishu.build_morning_report_card("", all_risks, review_text, today)
+
+    # 每个项目单独卡片（供 PM 接收）
+    for proj in projects:
+        name = proj["name"]
+        proj_risks = db.list_risks(status="open", project=name)
+        cards[name] = feishu.build_morning_report_card(name, proj_risks, None, today)
+
+    return cards
 
 
 async def main():

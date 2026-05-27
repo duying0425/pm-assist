@@ -984,6 +984,25 @@ def clear_pending_actions(chat_id: str):
     clear_pending(_ACTION_PENDING_PREFIX + chat_id)
 
 
+# ── AI 澄清问题待处理状态 ──────────────────────────────────
+
+_CLARIFY_PREFIX = "clarify:"
+
+def save_pending_clarify(chat_id: str, question: str, context: str = ""):
+    """保存 AI 澄清问题，TTL 与 pending_notes 相同。"""
+    payload = [{"question": question, "context": context}]
+    save_pending(_CLARIFY_PREFIX + chat_id, payload)
+
+
+def get_pending_clarify(chat_id: str) -> dict | None:
+    items = get_pending(_CLARIFY_PREFIX + chat_id)
+    return items[0] if items else None
+
+
+def clear_pending_clarify(chat_id: str):
+    clear_pending(_CLARIFY_PREFIX + chat_id)
+
+
 def save_nightly_review(content: str) -> int:
     today = datetime.now().strftime("%Y-%m-%d")
     with get_conn() as conn:
