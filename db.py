@@ -1173,7 +1173,7 @@ def get_users_summary() -> str:
     lines = []
     for r in rows:
         role_zh = _ROLE_ZH.get(r["role"], r["role"])
-        proj = f"，项目：{r['project']}" if r.get("project") else "，未绑定项目"
+        proj = f"，项目：{r['project']}" if r["project"] else "，未绑定项目"
         lines.append(f"- {r['name']}（{role_zh}{proj}）")
     return "\n".join(lines)
 
