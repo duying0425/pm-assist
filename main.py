@@ -253,7 +253,7 @@ def _strip_clarify(text: str) -> str:
     return text
 
 
-_EXECUTION_CLAIM_RE = re.compile(r"(已确认|已更新|已保存|已执行|已记录|我会记住)")
+_EXECUTION_CLAIM_RE = re.compile(r"(已确认|已更新|已保存|已执行|已记录|我会记住|已稳定记录|系统中已|已在系统|已存档|已收录)")
 
 
 def _sanitize_ai_execution_claims(text: str, will_send_card: bool = False) -> str:
