@@ -218,7 +218,7 @@ async def nightly_review(facts_text: str) -> str:
         retry_prompt = (
             prompt
             + "\n\n重要：上一次模型返回了空正文。请不要展开推理，直接输出最终报告；"
-              "必须包含全部十节（含末尾机器可读区），无内容的节写"无"，空数组也要输出。"
+              "必须包含全部十节（含末尾机器可读区），无内容的节写【无】，空数组也要输出。"
         )
         response = await _client.chat.completions.create(
             model=AI_MODEL,
