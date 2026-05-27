@@ -319,26 +319,47 @@ async def _send_review_to_admins_pm(report: str):
     log.info("manual review sent to %d admins/PMs: %s", len(recipients), recipients)
 
 
-async def _send_merge_candidates_card(chat_id: str, report: str):
-    if not chat_id:
-        return
-    candidates = _extract_merge_candidates(report)
-    if not candidates:
-        return
-    db.save_pending_merges(chat_id, candidates)
-    await feishu.send_merge_confirm_card(chat_id, candidates, FEISHU_APP_ID, FEISHU_APP_SECRET)
-    log.info("sent %d merge candidates to chat_id=%s", len(candidates), chat_id)
+def _collect_review_suggestion_items(report: str) -> list[dict]:
+    """将洗盘报告中的合并/清洗候选转为 AI 建议卡片 item 格式。"""
+    items: list[dict] = []
+    for c in _extract_merge_candidates(report):
+        merge_ids = c.get("merge_ids", [])
+        items.append({
+            "kind":        "merge_fact",
+            "keep_id":     c.get("keep_id"),
+            "merge_ids":   merge_ids,
+            "reason":      c.get("reason", ""),
+            "append_text": c.get("append_text", ""),
+            "title":       f"合并到 #{c.get('keep_id')}",
+        })
+    for c in _extract_action_candidates(report):
+        items.append({
+            "kind":     "review_action",
+            "sub_kind": c.get("kind"),    # "risk" / "fact" / "todo"
+            "action":   c.get("action"),  # "close" / "archive" / "done" / "cancel"
+            "id":       c.get("id"),
+            "title":    c.get("title", ""),
+            "reason":   c.get("reason", ""),
+        })
+    return items
 
 
-async def _send_action_candidates_card(chat_id: str, report: str):
+async def _send_review_suggestions_card(chat_id: str, report: str):
+    """将洗盘的合并+清洗建议合并为一张 AI 建议确认卡片发送。
+    chat_id 可能是群聊 ID 或个人 open_id（快捷菜单触发时）。
+    """
     if not chat_id:
         return
-    candidates = _extract_action_candidates(report)
-    if not candidates:
+    items = _collect_review_suggestion_items(report)
+    if not items:
         return
-    db.save_pending_actions(chat_id, candidates)
-    await feishu.send_action_confirm_card(chat_id, candidates, FEISHU_APP_ID, FEISHU_APP_SECRET)
-    log.info("sent %d action candidates to chat_id=%s", len(candidates), chat_id)
+    db.save_pending_commands(chat_id, items)
+    card = feishu.build_ai_suggestions_card(items, chat_id)
+    if chat_id.startswith("ou_"):
+        await feishu.send_reply_to_user(chat_id, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    else:
+        await feishu.send_reply(chat_id, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    log.info("sent %d review suggestion items to %s", len(items), chat_id)
 
 
 async def _morning_review_and_report():
@@ -1013,6 +1034,19 @@ def _save_suggestion_item(item: dict) -> bool:
             value = item.get("value", "")
             if tid and field:
                 db.update_todo(tid, **{field: value})
+        elif kind == "merge_fact":
+            _apply_merge_item({
+                "keep_id":     item.get("keep_id"),
+                "merge_ids":   item.get("merge_ids", []),
+                "append_text": item.get("append_text", ""),
+                "reason":      item.get("reason", ""),
+            })
+        elif kind == "review_action":
+            _apply_review_action({
+                "kind":   item.get("sub_kind"),
+                "action": item.get("action"),
+                "id":     item.get("id"),
+            })
         return True
     except Exception:
         log.exception("_save_suggestion_item error kind=%s", kind)
@@ -2144,16 +2178,16 @@ async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
         return "当前没有 active 项目信息条目，未生成洗盘报告。"
 
     await _send_review_to_admins_pm(_strip_merge_candidates_json(report))
-    await _send_merge_candidates_card(chat_id, report)
-    await _send_action_candidates_card(chat_id, report)
-    merge_count = len(_extract_merge_candidates(report))
-    action_count = len(_extract_action_candidates(report))
+    await _send_review_suggestions_card(chat_id, report)
+    review_items = _collect_review_suggestion_items(report)
+    merge_count  = sum(1 for x in review_items if x["kind"] == "merge_fact")
+    action_count = sum(1 for x in review_items if x["kind"] == "review_action")
     suffix_parts = []
     if merge_count:
         suffix_parts.append(f"{merge_count} 组合并建议")
     if action_count:
-        suffix_parts.append(f"{action_count} 项风险/待办处理建议")
-    suffix = f" 另发现 {'、'.join(suffix_parts)}，请在卡片中确认。" if suffix_parts else ""
+        suffix_parts.append(f"{action_count} 项清洗建议")
+    suffix = f" 另发现 {'、'.join(suffix_parts)}，请在卡片中逐条确认。" if suffix_parts else ""
     return f"✓ 已完成手动 AI 洗盘（{_review_mode_label(mode)}），报告已发送给管理员和 PM。{suffix}"
 
 

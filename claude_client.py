@@ -145,40 +145,40 @@ _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析
 4. risk/issue/blocker 需要关注超期、无负责人、长期无更新、是否已有行动项、是否可以关闭。
 5. decision 通常应固化保存，只检查是否缺少决策人、日期、影响范围，不轻易归档。
 
-请严格按以下结构输出：
+请严格按以下结构输出（每节用 ## 开头作为标题）：
 
-一、可归档信息
+## 一、可归档信息
 - 只列明确重复、已完成且失效、或明显不再相关的信息。
 - 低风险可自动归档的命令必须单独一行，并加 [AUTO] 前缀：
 [AUTO] /admin fact archive 3
 
-二、可合并信息
+## 二、可合并信息
 - 找出表达同一件事的多条信息，说明建议保留哪条、把哪些内容并入哪条。
 - 合并属于高风险动作，只给建议，不要输出 [AUTO] 命令。
 - 如果存在合并建议，必须同时在报告末尾的机器可读区写入 merge_candidates。
 
-三、当前状态更新建议
+## 三、当前状态更新建议
 - 找出应被更新为"当前状态"的条目，说明建议补充什么。
 - 可以给人工确认命令，但不要加 [AUTO]，例如：
 /admin fact update 12 body 新的状态描述
 
-四、风险候选
+## 四、风险候选
 - 从状态、里程碑、依赖、客户反馈中推导潜在风险。
 - 格式：来源 #ID、风险原因、建议风险标题、建议正文。
 - 只给人工确认命令，不要加 [AUTO]，例如：
 /admin fact add risk 标题 | 正文
 
-五、待办建议
+## 五、待办建议
 - 从风险候选或状态缺口中提炼下一步行动。
 - 只给人工确认命令，不要加 [AUTO]，例如：
 /todo 联系华阳确认 BSP 验证完成时间 risk 12
 - 如果已有 todo 可完成或取消，必须同时在报告末尾的机器可读区写入 action_candidates。
 
-六、描述质量改写建议
+## 六、描述质量改写建议
 - 找出描述太口语、缺背景、缺结论、缺下一步的信息。
 - 给出"建议改写正文"，但不要加 [AUTO]，不要自动覆盖。
 
-七、低风险字段补全
+## 七、低风险字段补全
 - 只针对 owner、priority、due_date、status 这类结构化字段。
 - 如果非常确定，可以给 [AUTO] 命令，命令必须单独一行：
 [AUTO] /admin fact update 8 owner 张三
@@ -186,16 +186,16 @@ _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析
 [AUTO] /admin fact update 10 due_date 2026-06-01
 [AUTO] /admin fact update 11 status resolved
 
-八、数据健康评分
+## 八、数据健康评分
 - 给出整体评分：优 / 良 / 待改善，并用一句话说明原因。
 
-九、机器可读合并建议
+## 九、机器可读合并建议
 - 必须放在报告最后，格式严格如下；没有合并建议时 merge_candidates 为空数组：
 ===MERGE_CANDIDATES_JSON===
 {{"merge_candidates":[{{"keep_id":12,"merge_ids":[18,21],"reason":"描述同一件事，#12 信息更完整","append_text":"#18/#21 补充的信息：华阳尚未给出明确完成时间，需持续跟进。"}}]}}
 ===END_MERGE_CANDIDATES_JSON===
 
-十、机器可读风险/待办动作建议
+## 十、机器可读风险/待办动作建议
 - 必须紧跟合并建议之后；没有建议时 action_candidates 为空数组：
 ===ACTION_CANDIDATES_JSON===
 {{"action_candidates":[{{"kind":"risk","id":12,"action":"close","reason":"风险已解决或已被新状态覆盖"}},{{"kind":"fact","id":18,"action":"archive","reason":"信息已过期"}},{{"kind":"todo","id":7,"action":"done","reason":"待办已完成"}},{{"kind":"todo","id":8,"action":"cancel","reason":"待办已不再需要"}}]}}

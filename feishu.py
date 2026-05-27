@@ -570,7 +570,14 @@ _SUGGESTION_SECTIONS = [
     ("other_fact",   "📋 知识 / 决策 / 信息"),
     ("todo",         "☐ 待办事项"),
     ("update",       "✏️ 更新建议"),
+    ("merge",        "🔀 合并建议"),
+    ("wash_action",  "⚙️ 清洗建议"),
 ]
+
+_REVIEW_ACTION_LABELS = {
+    "close": "关闭风险", "archive": "归档信息",
+    "done": "完成待办", "cancel": "取消待办",
+}
 
 
 def _suggestion_group(item: dict) -> str:
@@ -579,6 +586,10 @@ def _suggestion_group(item: dict) -> str:
         return "todo"
     if kind in ("update_fact", "update_todo"):
         return "update"
+    if kind == "merge_fact":
+        return "merge"
+    if kind == "review_action":
+        return "wash_action"
     ftype = item.get("type", "knowledge")
     if ftype in ("risk", "issue", "blocker", "dependency"):
         return "risk_fact"
@@ -618,6 +629,21 @@ def _suggestion_row_text(item: dict) -> str:
             parts.append(f"截止：{item['due_date']}")
         meta = "  ".join(parts) if parts else "待填写"
         return f"**{item.get('title', '')}**{status_tag}\n{meta}"
+
+    if kind == "merge_fact":
+        keep_id = item.get("keep_id", "")
+        merge_ids = item.get("merge_ids", [])
+        from_str = "、".join(f"#{mid}" for mid in merge_ids)
+        reason = (item.get("reason") or "")[:50]
+        return f"**合并到 #{keep_id}**{status_tag}  合入 {from_str}\n{reason}"
+
+    if kind == "review_action":
+        sub_kind = item.get("sub_kind", "")
+        action = item.get("action", "")
+        label = _REVIEW_ACTION_LABELS.get(action, action)
+        prefix = "#T" if sub_kind == "todo" else "#"
+        reason = (item.get("reason") or "")[:50]
+        return f"**{label}** {prefix}{item.get('id', '')}{status_tag}\n{reason}"
 
     # update_fact / update_todo
     prefix = "#T" if kind == "update_todo" else "#"
@@ -755,6 +781,40 @@ def build_suggestion_detail_card(item: dict, chat_id: str, index: int) -> dict:
             elements.extend([{"tag": "hr"}, _md(item["body"])])
         header_text = f"新增待办：{item.get('title', '')[:40]}"
         header_color = "blue"
+
+    elif kind == "merge_fact":
+        keep_id = item.get("keep_id", "")
+        merge_ids = item.get("merge_ids", [])
+        from_str = "、".join(f"#{mid}" for mid in merge_ids)
+        append_text = item.get("append_text", "")
+        reason = item.get("reason", "")
+        meta = (
+            f"**建议操作**  合并信息\n"
+            f"**保留条目**  #{keep_id}\n"
+            f"**合入条目**  {from_str}\n"
+            f"**原因**  {reason}"
+        )
+        elements: list[dict] = [_md(meta)]
+        if append_text:
+            elements.extend([{"tag": "hr"}, _md(f"**追加内容预览：**\n{append_text}")])
+        header_text = f"合并到 #{keep_id}  ← {from_str}"
+        header_color = "yellow"
+
+    elif kind == "review_action":
+        sub_kind = item.get("sub_kind", "")
+        action = item.get("action", "")
+        label = _REVIEW_ACTION_LABELS.get(action, action)
+        prefix = "#T" if sub_kind == "todo" else "#"
+        reason = item.get("reason", "")
+        title = item.get("title", "")
+        meta = (
+            f"**建议操作**  {label}\n"
+            f"**目标**  {prefix}{item.get('id', '')} {title}\n"
+            f"**原因**  {reason}"
+        )
+        elements = [_md(meta)]
+        header_text = f"{label}：{prefix}{item.get('id', '')} {title[:30]}"
+        header_color = "red" if action in ("close", "archive") else "blue"
 
     else:  # update_fact / update_todo
         prefix = "#T" if kind == "update_todo" else "#"

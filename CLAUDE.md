@@ -770,6 +770,7 @@ _SUGGESTION_SECTIONS = [("risk_fact","⚠️ 风险/问题"),("schedule_fact","�
 - v0.8.4 已部署（补全 AI 命令集含 risk owner/close/reopen；修复卡片发送失败静默问题，新增 400 响应日志与失败兜底提示）
 - v0.8.5 已部署（新增 AI 执行口吻防误导：无命令时禁止”已确认/已更新/已保存/已执行”语气，统一提示”仅建议未落库”）
 - v0.9.0 已部署并验证（AI 建议整合到主回复：取消单独 extract_facts/extract_todo_intent 调用，AI 在回复中内嵌 ===SUGGESTIONS=== 块；统一建议确认卡片 build_ai_suggestions_card，支持按类型分组/详情查看/按条保存跳过/全部保存跳过；旧 command_*/save_one/save_all/todo 卡片全部清理；修复 AI 建议块未触发：提示词重构移至末尾并加具体示例，历史记录存 clean 版本避免污染）
+- v0.9.1 本地完成（洗盘卡片修复+优化：合并/清洗建议统一进入 AI 建议卡片；修复快捷菜单触发时 open_id 当 chat_id 发送失败的 bug；洗盘报告章节标题改用 ## Markdown 格式）
 - **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
