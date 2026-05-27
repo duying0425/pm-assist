@@ -1706,13 +1706,24 @@ async def _handle_message(event: dict):
     clarify_data = _extract_clarify(reply)
     clean_reply  = _strip_clarify(reply)
     suggestions  = _extract_suggestions(clean_reply)
+    has_block = "===SUGGESTIONS===" in reply
+    log.info("suggestions_found=%s has_sugg_block=%s n_items=%s role=%s reply_tail=%r",
+             bool(suggestions), has_block,
+             len(suggestions) if suggestions else 0,
+             user_role, reply[-300:])
+    if not has_block:
+        log.info("AI did not include SUGGESTIONS block")
+    elif suggestions is None:
+        log.warning("SUGGESTIONS block found but JSON parse failed: %r",
+                    reply[reply.find("===SUGGESTIONS==="):reply.find("===SUGGESTIONS===")+300])
     clean_reply  = _strip_suggestions(clean_reply)
-    clean_reply  = _sanitize_ai_execution_claims(clean_reply)
-
+    # 先存原始干净回复到历史（避免 sanitize 文本污染对话上下文）
     db.add_message(chat_id, "assistant", clean_reply)
+    # 仅在展示给用户时才加"已执行"误导性措辞警告
+    display_reply = _sanitize_ai_execution_claims(clean_reply)
 
     # 用实际回复卡片原地更新占位消息
-    reply_card = feishu.build_md_card(clean_reply)
+    reply_card = feishu.build_md_card(display_reply)
     if msg_id:
         updated = await feishu.update_message_card(msg_id, reply_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
         if not updated:
@@ -1724,6 +1735,7 @@ async def _handle_message(event: dict):
     # 发送 AI 建议确认卡片（PM / 管理员）
     if suggestions and user_role in ("pm", "super_admin"):
         enriched = _enrich_suggestions(suggestions, project)
+        log.info("enriched suggestions count=%d raw=%d", len(enriched), len(suggestions))
         if enriched:
             await _send_ai_suggestions_card(chat_id, enriched)
 
