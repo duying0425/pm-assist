@@ -493,6 +493,14 @@ async def _handle_card_callback(body: dict) -> dict:
         db.clear_pending_actions(chat_id)
         return feishu.card_action_skipped_response()
 
+    if action == "command_one":
+        return _card_command_one(value, chat_id)
+    if action == "command_all":
+        return _card_command_all(value, chat_id)
+    if action == "skip_commands":
+        db.clear_pending_commands(chat_id)
+        return feishu.card_command_skipped_response()
+
     db.clear_pending(chat_id)
     return feishu.card_skipped_response()
 
@@ -621,6 +629,109 @@ def _card_review_action_all(value: dict, chat_id: str) -> dict:
     return feishu.card_action_skipped_response()
 
 
+def _extract_command_candidates(text: str, sender_open_id: str,
+                                project: str | None) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    user_role = (db.get_user(sender_open_id) or {}).get("role", "")
+    allowed = (
+        re.compile(r"^/admin\s+fact\s+update\s+\d+\s+(status|owner|priority|due_date|title|body)\s+.+$", re.I),
+        re.compile(r"^/admin\s+fact\s+archive\s+\d+\s*$", re.I),
+        re.compile(r"^/admin\s+fact\s+add\s+(risk|issue|milestone|decision|team|client|knowledge|process|org)\s+.+$", re.I),
+        re.compile(r"^/risk\s+add\s+(risk|issue|blocker|dependency)\s+(high|medium|low)\s+.+$", re.I),
+        re.compile(r"^/todo\s+update\s+\d+\s+(title|body|priority|owner|due_date)\s+.+$", re.I),
+        re.compile(r"^/todo\s+(done|cancel)\s+\d+\s*$", re.I),
+        re.compile(r"^/todo\s+(?!list\b|show\b|help\b).+", re.I),
+    )
+    for line in text.splitlines():
+        cmd = line.strip().strip("`")
+        cmd = re.sub(r"^[-*•]\s+", "", cmd)
+        cmd = re.sub(r"^\d+[.)、]\s+", "", cmd)
+        cmd = cmd.strip().strip("`")
+        if cmd.startswith("[AUTO]"):
+            cmd = cmd[len("[AUTO]"):].strip()
+        if not cmd.startswith(("/admin", "/risk", "/todo")):
+            continue
+        if cmd.startswith("/admin") and user_role != "super_admin":
+            continue
+        if not any(pattern.match(cmd) for pattern in allowed):
+            continue
+        if cmd in seen:
+            continue
+        seen.add(cmd)
+        if cmd.startswith("/admin fact update"):
+            title = "更新知识库字段"
+        elif cmd.startswith("/admin fact archive"):
+            title = "归档知识库条目"
+        elif cmd.startswith("/admin fact add"):
+            title = "新增知识库条目"
+        elif cmd.startswith("/risk add"):
+            title = "新增风险"
+        elif cmd.startswith("/todo update"):
+            title = "更新待办"
+        elif re.match(r"^/todo\s+(done|cancel)\b", cmd, re.I):
+            title = "处理待办"
+        else:
+            title = "新增待办"
+        candidates.append({
+            "command": cmd,
+            "title": title,
+            "sender_open_id": sender_open_id,
+            "project": project,
+        })
+    return candidates[:10]
+
+
+def _execute_confirmed_command(item: dict) -> str:
+    cmd = item.get("command", "").strip()
+    project = item.get("project")
+    sender_open_id = item.get("sender_open_id", "")
+    if cmd.startswith("/admin"):
+        return _handle_admin(cmd, sender_open_id, project, "")
+    if cmd.startswith("/risk"):
+        args = cmd.split(None, 1)[1].split() if len(cmd.split(None, 1)) > 1 else []
+        return _handle_admin_risk(args, project=project)
+    if cmd.startswith("/todo"):
+        return _handle_todo(cmd, project=project)
+    raise ValueError(f"unsupported command: {cmd}")
+
+
+def _card_command_one(value: dict, chat_id: str) -> dict:
+    index = int(value.get("index", -1))
+    saved_count = int(value.get("saved_count", 0))
+    saved, remaining = db.pop_pending_command(chat_id, index)
+    if saved:
+        _execute_confirmed_command(saved)
+        saved_count += 1
+        if remaining:
+            return feishu.card_command_one_saved_response(saved, remaining, chat_id, saved_count)
+        return feishu.card_command_saved_response(saved_count)
+    return feishu.card_command_skipped_response()
+
+
+def _card_command_all(value: dict, chat_id: str) -> dict:
+    prev_saved = int(value.get("saved_count", 0))
+    pending = db.get_pending_commands(chat_id)
+    if pending:
+        for item in pending:
+            _execute_confirmed_command(item)
+        db.clear_pending_commands(chat_id)
+        return feishu.card_command_saved_response(prev_saved + len(pending))
+    db.clear_pending_commands(chat_id)
+    return feishu.card_command_skipped_response()
+
+
+async def _send_command_candidates_card(chat_id: str, reply: str,
+                                        sender_open_id: str,
+                                        project: str | None):
+    commands = _extract_command_candidates(reply, sender_open_id, project)
+    if not commands:
+        return
+    db.save_pending_commands(chat_id, commands)
+    await feishu.send_command_confirm_card(chat_id, commands, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    log.info("sent %d command candidates to chat_id=%s", len(commands), chat_id)
+
+
 async def _handle_card_trigger(event: dict) -> dict:
     try:
         value = event.get("action", {}).get("value", {})
@@ -707,6 +818,14 @@ async def _handle_card_trigger(event: dict) -> dict:
             return feishu.card_action_skipped_response()
 
         # ── AI 澄清问题选项点击 ──
+        if action == "command_one":
+            return _card_command_one(value, chat_id)
+        if action == "command_all":
+            return _card_command_all(value, chat_id)
+        if action == "skip_commands":
+            db.clear_pending_commands(chat_id)
+            return feishu.card_command_skipped_response()
+
         if action == "clarify_option":
             option_text  = value.get("text", "")
             chat_id      = value.get("chat_id", "")
@@ -831,6 +950,7 @@ async def _handle_bot_menu(event: dict):
             db.clear_history(chat_id)
             db.clear_pending(chat_id)
             db.clear_pending_todos(chat_id)
+            db.clear_pending_commands(chat_id)
             await send("对话历史已清除。")
             return
 
@@ -913,6 +1033,93 @@ def _sender_info(user: dict) -> str:
     if role == "member":
         return f"项目成员-{name}{proj_tag}"
     return f"{name}（未注册用户）"
+
+
+_CONFIRM_SAVE_TEXTS = {
+    "保存", "确认", "确认保存", "全部保存", "保存全部", "同意", "可以", "执行", "全部执行",
+    "更新", "确认更新", "保存吧", "存", "存一下",
+}
+_CONFIRM_SKIP_TEXTS = {"跳过", "取消", "不保存", "不用保存", "忽略", "算了"}
+
+
+def _normalized_confirm_text(text: str) -> str:
+    return re.sub(r"[\s。.!！?？]+", "", text.strip().lower())
+
+
+def _has_pending_confirmation(chat_id: str) -> bool:
+    return any((
+        db.get_pending(chat_id),
+        db.get_pending_todos(chat_id),
+        db.get_pending_commands(chat_id),
+        db.get_pending_merges(chat_id),
+        db.get_pending_actions(chat_id),
+    ))
+
+
+def _clear_all_pending_confirmations(chat_id: str):
+    db.clear_pending(chat_id)
+    db.clear_pending_todos(chat_id)
+    db.clear_pending_commands(chat_id)
+    db.clear_pending_merges(chat_id)
+    db.clear_pending_actions(chat_id)
+
+
+async def _handle_text_confirmation(chat_id: str, text: str) -> bool:
+    normalized = _normalized_confirm_text(text)
+    if normalized not in _CONFIRM_SAVE_TEXTS and normalized not in _CONFIRM_SKIP_TEXTS:
+        return False
+
+    if normalized in _CONFIRM_SKIP_TEXTS:
+        if _has_pending_confirmation(chat_id):
+            _clear_all_pending_confirmations(chat_id)
+            await feishu.send_reply(chat_id, "已跳过当前待确认项。", FEISHU_APP_ID, FEISHU_APP_SECRET)
+        else:
+            await feishu.send_reply(chat_id, "当前没有待确认项。", FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return True
+
+    fact_items = db.get_pending(chat_id)
+    todo_items = db.get_pending_todos(chat_id)
+    command_items = db.get_pending_commands(chat_id)
+    merge_items = db.get_pending_merges(chat_id)
+    action_items = db.get_pending_actions(chat_id)
+
+    if not any((fact_items, todo_items, command_items, merge_items, action_items)):
+        await feishu.send_reply(chat_id, "当前没有待确认项；需要保存时请点击确认卡片，或先发具体内容。", FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return True
+
+    saved_parts: list[str] = []
+    for item in fact_items:
+        _save_fact_item(item)
+    if fact_items:
+        db.clear_pending(chat_id)
+        saved_parts.append(f"知识库 {len(fact_items)} 条")
+
+    for item in todo_items:
+        _save_todo_item(item)
+    if todo_items:
+        db.clear_pending_todos(chat_id)
+        saved_parts.append(f"待办 {len(todo_items)} 条")
+
+    for item in command_items:
+        _execute_confirmed_command(item)
+    if command_items:
+        db.clear_pending_commands(chat_id)
+        saved_parts.append(f"更新命令 {len(command_items)} 项")
+
+    for item in merge_items:
+        _apply_merge_item(item)
+    if merge_items:
+        db.clear_pending_merges(chat_id)
+        saved_parts.append(f"合并 {len(merge_items)} 组")
+
+    for item in action_items:
+        _apply_review_action(item)
+    if action_items:
+        db.clear_pending_actions(chat_id)
+        saved_parts.append(f"处理建议 {len(action_items)} 项")
+
+    await feishu.send_reply(chat_id, "已确认：" + "、".join(saved_parts), FEISHU_APP_ID, FEISHU_APP_SECRET)
+    return True
 
 
 async def _handle_message(event: dict):
@@ -1030,6 +1237,9 @@ async def _handle_message(event: dict):
     project = _resolve_project(chat_id, user)
 
     # ── 管理员专用命令 ──
+    if user_role in ("pm", "super_admin") and await _handle_text_confirmation(chat_id, text):
+        return
+
     if text.startswith("/admin"):
         if user_role != "super_admin":
             await feishu.send_reply(chat_id, "无权限：/admin 命令仅限管理员使用。",
@@ -1087,12 +1297,11 @@ async def _handle_message(event: dict):
         db.clear_history(chat_id)
         db.clear_pending(chat_id)
         db.clear_pending_todos(chat_id)
+        db.clear_pending_commands(chat_id)
         await feishu.send_reply(chat_id, "对话历史已清除。", FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
     # ── AI 对话（member/pm/super_admin 均可，上下文深度不同）──
-    db.clear_pending(chat_id)
-    db.clear_pending_todos(chat_id)
 
     # 若有待处理澄清问题，把上下文拼入用户消息，然后清除
     pending_clarify = db.get_pending_clarify(chat_id)
@@ -1146,6 +1355,9 @@ async def _handle_message(event: dict):
             await feishu.send_reply(chat_id, reply_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
     else:
         await feishu.send_reply(chat_id, reply_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+
+    if user_role in ("pm", "super_admin"):
+        await _send_command_candidates_card(chat_id, clean_reply, sender_open_id, project)
 
     # 如果 AI 附带了澄清问题，额外发送问题卡片并记录待处理状态
     if clarify_data and user_role in ("pm", "super_admin"):

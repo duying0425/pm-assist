@@ -725,7 +725,8 @@ _ACTION_LABELS = {("risk","close"):"关闭风险", ("fact","archive"):"归档信
 - v0.7.8 已部署（飞书消息全卡片化 + /schedule 里程碑命令 + 删除 _strip_md）
 - v0.8.0 已部署（按项目早报卡片+PM推送、风险/待办列表可点击详情、AI标题加粗渲染修复、AI澄清问题卡片）
 - v0.8.1 已部署（飞书卡片全面升级 schema 2.0；"思考中"卡片原地更新修复：PATCH 端点从 /body 改为正确的 /messages/{id}，注入 update_multi:true）
-- v0.8.2 本地就绪待部署（管理员 /join 直接绑定项目；无绑定时查全量跨项目上下文；AI 注入用户列表；sender_info 显示管理员项目）
+- v0.8.2 已部署（管理员 /join 直接绑定项目；无绑定时查全量跨项目上下文；AI 注入用户列表；sender_info 显示管理员项目）
+- v0.8.3 本地就绪待部署（保留待确认状态；文字“保存/确认/跳过”可消费 pending；AI 建议命令转确认按钮后再写库）
 - **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）

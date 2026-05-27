@@ -773,6 +773,107 @@ _TYPE_TAG = {
 }
 
 
+def build_command_confirm_card(commands: list[dict], chat_id: str,
+                               saved_count: int = 0) -> dict:
+    elements = []
+    for i, item in enumerate(commands[:10]):
+        title = item.get("title") or item.get("command", "")
+        command = item.get("command", "")
+        desc = item.get("description", "")
+        preview = command if len(command) <= 90 else command[:87] + "..."
+        desc_line = f"\n{desc}" if desc else ""
+
+        elements.append({
+            "tag": "column_set",
+            "flex_mode": "none",
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 5,
+                    "elements": [_lark_div(
+                        f"**{i + 1}. {title}**{desc_line}\n`{preview}`"
+                    )],
+                },
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "elements": [{
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "执行"},
+                        "type": "primary",
+                        "value": {
+                            "action": "command_one",
+                            "chat_id": chat_id,
+                            "index": i,
+                            "saved_count": saved_count,
+                        },
+                    }],
+                },
+            ],
+        })
+
+    title_text = (f"已执行 {saved_count} 项，还剩 {len(commands)} 项"
+                  if saved_count > 0
+                  else f"AI 建议执行 {len(commands)} 项更新")
+    elements.extend([
+        {"tag": "hr"},
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "全部执行"},
+                    "type": "primary",
+                    "value": {"action": "command_all", "chat_id": chat_id,
+                              "saved_count": saved_count},
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "跳过"},
+                    "type": "danger",
+                    "value": {"action": "skip_commands", "chat_id": chat_id},
+                },
+            ],
+        },
+    ])
+    header_color = "green" if saved_count > 0 else "blue"
+    return _card(elements, header=_header(title_text, header_color), forward=False)
+
+
+async def send_command_confirm_card(chat_id: str, commands: list[dict],
+                                    app_id: str, app_secret: str):
+    token = await get_tenant_token(app_id, app_secret)
+    card = build_command_confirm_card(commands, chat_id)
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{FEISHU_BASE}/im/v1/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"receive_id_type": "chat_id"},
+            json={"receive_id": chat_id, "msg_type": "interactive",
+                  "content": json.dumps(card)},
+        )
+
+
+def card_command_saved_response(count: int) -> dict:
+    return _resp("success", f"已执行 {count} 项",
+                 [_md(f"已执行 {count} 项更新。")])
+
+
+def card_command_one_saved_response(item: dict, remaining: list[dict],
+                                    chat_id: str, saved_count: int) -> dict:
+    updated = build_command_confirm_card(remaining, chat_id, saved_count)
+    return {
+        "toast": {"type": "success", "content": f"已执行：{item.get('title', '')[:20]}"},
+        "card": {"type": "raw", "data": updated},
+    }
+
+
+def card_command_skipped_response() -> dict:
+    return _resp("info", "已跳过", [_md("已跳过 AI 建议的更新。")])
+
+
 def build_risk_list_card(rows: list, status_filter: str = "open") -> dict:
     """/risk list 结构化卡片，每条附带「详情」按钮。"""
     if not rows:
