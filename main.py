@@ -868,14 +868,16 @@ async def _handle_bot_menu(event: dict):
         log.exception("_handle_bot_menu error event_key=%s", event.get("event_key", ""))
 
 
-def _resolve_project(chat_id: str, user: dict) -> str:
-    """确定本次对话的项目：群聊绑定 > 用户绑定 > 第一个活跃项目。"""
+def _resolve_project(chat_id: str, user: dict) -> str | None:
+    """确定本次对话的项目：群聊绑定 > 用户绑定 > 管理员返回 None（全量）> 默认。"""
     binding = db.get_chat_binding(chat_id)
     if binding:
         return binding
     p = user.get("project", "")
     if p:
         return p
+    if user.get("role") == "super_admin":
+        return None  # admin without binding sees cross-project data
     return "默认"
 
 
@@ -904,7 +906,8 @@ def _sender_info(user: dict) -> str:
     project = user.get("project", "")
     proj_tag = f"（{project}项目）" if project else ""
     if role == "super_admin":
-        return f"管理员-{name}（最高权限，可询问系统数据和数据库信息）"
+        proj_tag = f"，当前关注项目：{project}" if project else "，全局视图（未绑定项目）"
+        return f"管理员-{name}（最高权限，可询问系统数据和数据库信息{proj_tag}）"
     if role == "pm":
         return f"项目经理PM-{name}{proj_tag}"
     if role == "member":
@@ -1102,6 +1105,8 @@ async def _handle_message(event: dict):
     db.add_message(chat_id, "user", text)
     history = db.get_history(chat_id, MAX_HISTORY)
     context = db.get_full_context(project)
+    if user_role == "super_admin":
+        context["users"] = db.get_users_summary()
     sender_info_str = _sender_info(user)
 
     # 先发"思考中"卡片占位，拿到 message_id 以便后续原地更新
@@ -1201,9 +1206,10 @@ async def _handle_join(text: str, sender_open_id: str, user: dict) -> str:
         names = "、".join(p["name"] for p in projects) if projects else "（暂无）"
         return f"找不到项目「{project_name}」。\n当前可用项目：{names}\n\n发 /start 查看详情。"
 
-    # 已是 super_admin，不需要申请
+    # 已是 super_admin：直接绑定项目，无需审批
     if user.get("role") == "super_admin":
-        return "你已经是管理员，无需申请注册。"
+        db.update_user(sender_open_id, project=project_name)
+        return f"✓ 已将你的项目绑定改为「{project_name}」，之后的 AI 对话将使用该项目上下文。\n（管理员可随时用 /join [项目名] 切换项目，或 /admin user project [open_id] - 清除绑定）"
 
     # 已经是 active 用户
     if user.get("status") == "active" and user.get("project"):
@@ -1264,6 +1270,8 @@ async def _clarify_and_respond(chat_id: str, sender_oid: str, user: dict,
     try:
         history = db.get_history(chat_id, MAX_HISTORY)
         context = db.get_full_context(project)
+        if user.get("role") == "super_admin":
+            context["users"] = db.get_users_summary()
         sender_info = _sender_info(user)
         role = user.get("role", "pm")
         reply = await asyncio.wait_for(

@@ -551,28 +551,42 @@ def list_todos(status: str | None = "open", project: str | None = None,
         ).fetchall()
 
 
-def get_todos_for_context(project: str = "默认",
+def get_todos_for_context(project: str | None = None,
                           open_limit: int = 30,
                           done_limit: int = 10,
                           done_days: int = 14) -> str:
-    """返回待办事项文本，供 AI 上下文注入。包含 open 条目和近期完成条目，均带时间信息。"""
+    """返回待办事项文本，供 AI 上下文注入。project=None 返回全量（跨项目）。"""
     from datetime import datetime as _dt, timedelta as _td
     _PRIO = {"high": "高", "medium": "中", "low": "低"}
     _RISK_ZH = {"risk": "风险", "issue": "问题", "blocker": "阻塞", "dependency": "依赖"}
     cutoff = (_dt.now() - _td(days=done_days)).strftime("%Y-%m-%d")
+    cross_project = project is None
 
     with get_conn() as conn:
-        open_rows = conn.execute(
-            "SELECT * FROM todos WHERE status='open' AND project=?"
-            " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id"
-            " LIMIT ?",
-            (project, open_limit),
-        ).fetchall()
-        done_rows = conn.execute(
-            "SELECT * FROM todos WHERE status='done' AND project=? AND updated_at >= ?"
-            " ORDER BY updated_at DESC LIMIT ?",
-            (project, cutoff, done_limit),
-        ).fetchall()
+        if not cross_project:
+            open_rows = conn.execute(
+                "SELECT * FROM todos WHERE status='open' AND project=?"
+                " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id"
+                " LIMIT ?",
+                (project, open_limit),
+            ).fetchall()
+            done_rows = conn.execute(
+                "SELECT * FROM todos WHERE status='done' AND project=? AND updated_at >= ?"
+                " ORDER BY updated_at DESC LIMIT ?",
+                (project, cutoff, done_limit),
+            ).fetchall()
+        else:
+            open_rows = conn.execute(
+                "SELECT * FROM todos WHERE status='open'"
+                " ORDER BY project, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id"
+                " LIMIT ?",
+                (open_limit,),
+            ).fetchall()
+            done_rows = conn.execute(
+                "SELECT * FROM todos WHERE status='done' AND updated_at >= ?"
+                " ORDER BY updated_at DESC LIMIT ?",
+                (cutoff, done_limit),
+            ).fetchall()
 
     if not open_rows and not done_rows:
         return ""
@@ -611,6 +625,7 @@ def get_todos_for_context(project: str = "默认",
         if p and p != "中": line += f" [{p}]"
         if r["owner"]:    line += f"  owner:{r['owner']}"
         if r["due_date"]: line += f"  due:{r['due_date']}"
+        if cross_project and r.get("project"): line += f"  项目:{r['project']}"
         line += f"  创建:{r['created_at'][:10]}"
         return line
 
@@ -637,6 +652,7 @@ def get_todos_for_context(project: str = "默认",
             r = dict(r)
             line = f"- [x] #T{r['id']} {r['title']}"
             if r["owner"]: line += f"  owner:{r['owner']}"
+            if cross_project and r.get("project"): line += f"  项目:{r['project']}"
             line += f"  完成:{r['updated_at'][:10]}"
             lines.append(line)
 
@@ -645,10 +661,11 @@ def get_todos_for_context(project: str = "默认",
 
 # ── AI 上下文拼装（三层结构）─────────────────────────────────
 
-def get_full_context(project: str = "默认") -> dict:
+def get_full_context(project: str | None = None) -> dict:
     """返回结构化上下文供 AI 使用。
+    project=None 时返回全量（跨项目），适合管理员无项目绑定场景。
     Layer 0: 部门预设假设（总是注入）
-    Layer 1: 项目级假设
+    Layer 1: 项目级假设（project=None 时跳过）
     Layer 2+: facts 按维度分组
     """
     _PRIO = {"high": "高", "medium": "中", "low": "低"}
@@ -657,6 +674,7 @@ def get_full_context(project: str = "默认") -> dict:
         "milestone": "里程碑", "decision": "决策", "process": "流程",
         "team": "人员", "client": "客户", "org": "组织", "knowledge": "知识",
     }
+    cross_project = project is None
 
     with get_conn() as conn:
         # Layer 0: 部门通用假设
@@ -666,27 +684,44 @@ def get_full_context(project: str = "默认") -> dict:
             " ORDER BY CASE confidence WHEN 'universal' THEN 0 WHEN 'common' THEN 1 ELSE 2 END, id"
         ).fetchall()
 
-        # Layer 1: 项目专属假设
-        proj_rows = conn.execute(
-            "SELECT title, body, confidence FROM assumptions"
-            " WHERE active=1 AND scope='project' AND scope_ref=?"
-            " ORDER BY id", (project,)
-        ).fetchall()
+        # Layer 1: 项目专属假设（全量模式跳过）
+        if not cross_project:
+            proj_rows = conn.execute(
+                "SELECT title, body, confidence FROM assumptions"
+                " WHERE active=1 AND scope='project' AND scope_ref=?"
+                " ORDER BY id", (project,)
+            ).fetchall()
+        else:
+            proj_rows = []
 
         # Layer 2: 风险（dimension=risk）
-        risk_rows = conn.execute(
-            "SELECT id, type, title, body, owner, priority, due_date, created_at, updated_at FROM facts"
-            " WHERE dimension='risk' AND status='active' AND project=?"
-            " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id",
-            (project,)
-        ).fetchall()
+        if not cross_project:
+            risk_rows = conn.execute(
+                "SELECT id, type, title, body, owner, priority, due_date, project, created_at, updated_at FROM facts"
+                " WHERE dimension='risk' AND status='active' AND project=?"
+                " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id",
+                (project,)
+            ).fetchall()
+        else:
+            risk_rows = conn.execute(
+                "SELECT id, type, title, body, owner, priority, due_date, project, created_at, updated_at FROM facts"
+                " WHERE dimension='risk' AND status='active'"
+                " ORDER BY project, CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id"
+            ).fetchall()
 
         # Layer 3: 进度（dimension=schedule）
-        schedule_rows = conn.execute(
-            "SELECT id, type, title, body, due_date, created_at, updated_at FROM facts"
-            " WHERE dimension='schedule' AND status='active' AND project=?"
-            " ORDER BY due_date, id", (project,)
-        ).fetchall()
+        if not cross_project:
+            schedule_rows = conn.execute(
+                "SELECT id, type, title, body, due_date, project, created_at, updated_at FROM facts"
+                " WHERE dimension='schedule' AND status='active' AND project=?"
+                " ORDER BY due_date, id", (project,)
+            ).fetchall()
+        else:
+            schedule_rows = conn.execute(
+                "SELECT id, type, title, body, due_date, project, created_at, updated_at FROM facts"
+                " WHERE dimension='schedule' AND status='active'"
+                " ORDER BY project, due_date, id"
+            ).fetchall()
 
         # Layer 4: 决策（dimension=decision）
         decision_rows = conn.execute(
@@ -721,6 +756,7 @@ def get_full_context(project: str = "默认") -> dict:
             line = f"[{t}·{p}] #{r['id']} {r['title']}：{r['body']}"
             if r["owner"]:    line += f"（负责人：{r['owner']}）"
             if r["due_date"]: line += f"（截止：{r['due_date']}）"
+            if cross_project and r["project"]: line += f"（项目：{r['project']}）"
             line += f"（记录:{r['created_at'][:10]}"
             if r["updated_at"][:10] != r["created_at"][:10]:
                 line += f" 更新:{r['updated_at'][:10]}"
@@ -736,6 +772,7 @@ def get_full_context(project: str = "默认") -> dict:
             t = _TYPE_ZH.get(r["type"], r["type"])
             line = f"[{t}] #{r['id']} {r['title']}"
             if r["due_date"]: line += f"（目标:{r['due_date']}）"
+            if cross_project and r["project"]: line += f"（项目：{r['project']}）"
             line += f"（记录:{r['created_at'][:10]}"
             if r["updated_at"][:10] != r["created_at"][:10]:
                 line += f" 更新:{r['updated_at'][:10]}"
@@ -1121,6 +1158,24 @@ def list_users(role: str | None = None, status: str | None = None) -> list:
         return conn.execute(
             f"SELECT * FROM users {where} ORDER BY role, name", params
         ).fetchall()
+
+
+def get_users_summary() -> str:
+    """返回用户列表摘要，供管理员 AI 上下文使用，以便 AI 回答"谁在哪个项目"。"""
+    _ROLE_ZH = {"super_admin": "管理员", "pm": "项目经理", "member": "成员"}
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT name, role, project, status FROM users WHERE status='active'"
+            " ORDER BY role, project, name"
+        ).fetchall()
+    if not rows:
+        return ""
+    lines = []
+    for r in rows:
+        role_zh = _ROLE_ZH.get(r["role"], r["role"])
+        proj = f"，项目：{r['project']}" if r.get("project") else "，未绑定项目"
+        lines.append(f"- {r['name']}（{role_zh}{proj}）")
+    return "\n".join(lines)
 
 
 def delete_user(open_id: str):

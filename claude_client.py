@@ -56,7 +56,7 @@ _ROLE_MEMBER = """你是东软睿驰自动驾驶团队的内部助手。你可�
 
 _CONTEXT_TEMPLATE = """{role}
 
-{sender_section}{dept_section}{project_section}{todos_section}{risk_section}{schedule_section}{decision_section}{ref_section}"""
+{sender_section}{dept_section}{project_section}{users_section}{todos_section}{risk_section}{schedule_section}{decision_section}{ref_section}"""
 
 
 def _build_system(context: dict, sender_info: str = "", role: str = "pm") -> str:
@@ -65,6 +65,7 @@ def _build_system(context: dict, sender_info: str = "", role: str = "pm") -> str
             return ""
         return f"\n---\n## {title}\n{content}\n"
 
+    users_section = ""
     if role == "member":
         base_role = _ROLE_MEMBER
         todos_section    = ""
@@ -75,6 +76,7 @@ def _build_system(context: dict, sender_info: str = "", role: str = "pm") -> str
         todos_section    = section("待办事项（带追溯和时间信息）", context.get("todos", ""))
         risk_section     = section("当前活跃风险与问题", context.get("risks") or "（暂无已登记风险）")
         decision_section = section("关键决策记录", context.get("decisions", ""))
+        users_section    = section("系统注册用户（可回答谁在哪个项目）", context.get("users", ""))
     else:  # pm
         base_role    = _ROLE
         todos_section    = section("待办事项（带追溯和时间信息）", context.get("todos", ""))
@@ -92,6 +94,7 @@ def _build_system(context: dict, sender_info: str = "", role: str = "pm") -> str
         sender_section=sender_section,
         dept_section=dept_section,
         project_section=project_section,
+        users_section=users_section,
         todos_section=todos_section,
         risk_section=risk_section,
         schedule_section=schedule_section,

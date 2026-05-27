@@ -373,6 +373,7 @@ key / value / updated_at
 47. **快捷菜单项目查询逻辑统一**：有项目绑定查指定项目，无绑定查全量（对所有角色一致）；修复 PM 无绑定时按钮显示空数据的问题（v0.7.8）
 48. **飞书卡片全面升级 schema 2.0**：所有卡片 builder 添加 `"schema":"2.0"` 并将 `elements` 包进 `body`；AI 回复/文本展示改用 `{"tag":"markdown"}` 元素，支持完整 Markdown（`##` 标题、`|表格|`、代码块）；column 内部保留 `lark_md` 文本；系统提示同步解除 `##` 和表格禁令（v0.8.1）
 49. **"思考中"卡片原地更新修复**：卡片更新改用正确端点 `PATCH /im/v1/messages/{id}`（原 `/body` 子路径仅支持 text/post，不支持 interactive）；schema 2.0 更新时注入 `update_multi: True`；"思考中"占位卡片可被 AI 回复卡片原地替换（v0.8.1）
+50. **管理员项目绑定与全量 AI 上下文**：`/join [项目名]` 对管理员直接生效（无需审批）；管理员无项目绑定时 `_resolve_project` 返回 `None`，`get_full_context(None)` 查全量（所有项目的 facts/todos 均注入，带项目标注）；`_sender_info` 显示管理员当前关注项目；AI 上下文新增"系统注册用户"章节（`db.get_users_summary()`），AI 可回答"谁在哪个项目、什么角色"（v0.8.2）
 
 ## 命令速查
 
@@ -723,7 +724,8 @@ _ACTION_LABELS = {("risk","close"):"关闭风险", ("fact","archive"):"归档信
 - v0.7.7 已部署（/risk show + /todo show/update + approve/reject 通知幂等 + member 权限收敛 + TTL 延长至30分钟 + 帮助文本完整化）
 - v0.7.8 已部署（飞书消息全卡片化 + /schedule 里程碑命令 + 删除 _strip_md）
 - v0.8.0 已部署（按项目早报卡片+PM推送、风险/待办列表可点击详情、AI标题加粗渲染修复、AI澄清问题卡片）
-- v0.8.1 本地就绪待部署（飞书卡片全面升级 schema 2.0；"思考中"卡片原地更新修复：PATCH 端点从 /body 改为正确的 /messages/{id}，注入 update_multi:true）
+- v0.8.1 已部署（飞书卡片全面升级 schema 2.0；"思考中"卡片原地更新修复：PATCH 端点从 /body 改为正确的 /messages/{id}，注入 update_multi:true）
+- v0.8.2 本地就绪待部署（管理员 /join 直接绑定项目；无绑定时查全量跨项目上下文；AI 注入用户列表；sender_info 显示管理员项目）
 - **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）
