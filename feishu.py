@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import time
+import logging
 import httpx
 
 _token_cache: dict = {"value": None, "expires_at": 0}
+log = logging.getLogger(__name__)
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 
@@ -33,6 +35,18 @@ def _md(content: str) -> dict:
 def _lark_div(content: str) -> dict:
     """column 内部专用：div + lark_md（有限 Markdown，支持加粗/换行）。"""
     return {"tag": "div", "text": {"tag": "lark_md", "content": content}}
+
+
+def _button_row(buttons: list[dict]) -> dict:
+    columns = []
+    for btn in buttons:
+        columns.append({
+            "tag": "column",
+            "width": "weighted",
+            "weight": 1,
+            "elements": [btn],
+        })
+    return {"tag": "column_set", "flex_mode": "none", "columns": columns}
 
 
 def _card(elements: list, header: dict | None = None,
@@ -244,17 +258,6 @@ async def update_message_card(message_id: str, card: dict, app_id: str, app_secr
         return resp.status_code == 200
 
 
-async def send_confirm_card(chat_id: str, items: list[dict], app_id: str, app_secret: str):
-    token = await get_tenant_token(app_id, app_secret)
-    card = _build_confirm_card(items, chat_id)
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            f"{FEISHU_BASE}/im/v1/messages",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"receive_id_type": "chat_id"},
-            json={"receive_id": chat_id, "msg_type": "interactive",
-                  "content": json.dumps(card)},
-        )
 
 
 # ── 通用 lark_md / markdown 卡片 ──────────────────────────────
@@ -269,106 +272,8 @@ def build_thinking_card() -> dict:
     return build_md_card("⏳ 思考中...")
 
 
-# ── AI 信息提取确认卡片（知识库条目）──────────────────────────
-
-def _build_confirm_card(items: list[dict], chat_id: str, saved_count: int = 0) -> dict:
-    has_update = any(item.get("action") == "update" for item in items)
-    elements = []
-    for i, item in enumerate(items[:10]):
-        label = _TYPE_LABELS.get(item["type"], item["type"])
-        content = item["content"]
-        display = content if len(content) <= 55 else content[:52] + "…"
-
-        action = item.get("action", "new")
-        if action == "update":
-            fact_id = item.get("fact_id", "")
-            fact_title = item.get("fact_title", "")
-            short_title = fact_title[:18] + "…" if len(fact_title) > 18 else fact_title
-            note = f"*→ 追加到 #{fact_id}《{short_title}》*"
-            btn_text = f"追加 #{fact_id}"
-            btn_type = "default"
-        else:
-            note = "*→ 新增条目*"
-            btn_text = "新增"
-            btn_type = "primary"
-
-        elements.append({
-            "tag": "column_set",
-            "flex_mode": "none",
-            "columns": [
-                {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 5,
-                    "elements": [_lark_div(f"**{i + 1}. [{label}]** {display}\n{note}")],
-                },
-                {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 1,
-                    "elements": [{
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": btn_text},
-                        "type": btn_type,
-                        "value": {
-                            "action": "save_one",
-                            "chat_id": chat_id,
-                            "index": i,
-                            "saved_count": saved_count,
-                        },
-                    }],
-                },
-            ],
-        })
-
-    if saved_count > 0:
-        title_text = f"💡 已保存 {saved_count} 条，还剩 {len(items)} 条"
-        header_color = "green"
-    else:
-        title_text = "💡 发现可更新/记录信息" if has_update else "💡 发现可记录信息"
-        header_color = "blue"
-
-    elements.extend([
-        {"tag": "hr"},
-        {
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "✓ 全部保存"},
-                    "type": "primary",
-                    "value": {"action": "save_all", "chat_id": chat_id, "saved_count": saved_count},
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "✗ 跳过"},
-                    "type": "danger",
-                    "value": {"action": "skip", "chat_id": chat_id},
-                },
-            ],
-        },
-    ])
-    return _card(elements, header=_header(title_text, header_color), forward=False)
-
-
-def card_saved_response(count: int) -> dict:
-    return _resp("success", f"已保存 {count} 条",
-                 [_md(f"✅ 已保存 {count} 条，后续回答将参考。")])
-
-
-def card_one_saved_response(saved: dict, remaining: list[dict], chat_id: str,
-                             saved_count: int = 1) -> dict:
-    label = _TYPE_LABELS.get(saved["type"], saved["type"])
-    action = saved.get("action", "new")
-    verb = f"已追加到 #{saved.get('fact_id')}" if action == "update" else "已新增"
-    updated = _build_confirm_card(remaining, chat_id, saved_count)
-    return {
-        "toast": {"type": "success", "content": f"{verb}：[{label}]"},
-        "card": {"type": "raw", "data": updated},
-    }
-
-
 def card_skipped_response() -> dict:
+    """通用跳过/错误响应（用于澄清回调等兜底场景）。"""
     return _resp("info", "已跳过", [_md("⏭ 已跳过。")])
 
 
@@ -389,33 +294,30 @@ def build_approval_card(open_id: str, name: str, role: str, project: str) -> dic
             ],
         },
         {"tag": "hr"},
-        {
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "✅ 批准"},
-                    "type": "primary",
-                    "value": {
-                        "action": "approve_user",
-                        "open_id": open_id,
-                        "name": name,
-                        "role": role,
-                        "project": project,
-                    },
+        _button_row([
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "✅ 批准"},
+                "type": "primary",
+                "value": {
+                    "action": "approve_user",
+                    "open_id": open_id,
+                    "name": name,
+                    "role": role,
+                    "project": project,
                 },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "❌ 拒绝"},
-                    "type": "danger",
-                    "value": {
-                        "action": "reject_user",
-                        "open_id": open_id,
-                        "name": name,
-                    },
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "❌ 拒绝"},
+                "type": "danger",
+                "value": {
+                    "action": "reject_user",
+                    "open_id": open_id,
+                    "name": name,
                 },
-            ],
-        },
+            },
+        ]),
     ]
     return _card(elements, header=_header("📋 新用户注册申请", "blue"), wide=False, forward=False)
 
@@ -431,113 +333,6 @@ def card_rejected_response(name: str) -> dict:
                  [_md(f"❌ 已拒绝 **{name}** 的申请")])
 
 
-# ── 待办确认卡片 ──────────────────────────────────────────────
-
-_PRIO_ZH = {"high": "高", "medium": "中", "low": "低"}
-
-
-def build_todo_confirm_card(todos: list[dict], chat_id: str, saved_count: int = 0) -> dict:
-    elements = []
-    for i, todo in enumerate(todos[:10]):
-        title = todo.get("title", "")
-        due = todo.get("due_date", "")
-        priority = todo.get("priority", "medium")
-        owner = todo.get("owner", "")
-
-        meta_parts = [f"优先级：{_PRIO_ZH.get(priority, priority)}"]
-        if due:
-            meta_parts.append(f"截止：{due}")
-        if owner:
-            meta_parts.append(f"负责人：{owner}")
-        meta = "  ".join(meta_parts)
-
-        elements.append({
-            "tag": "column_set",
-            "flex_mode": "none",
-            "columns": [
-                {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 5,
-                    "elements": [_lark_div(f"**{i + 1}. {title}**\n{meta}")],
-                },
-                {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 1,
-                    "elements": [{
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "新增"},
-                        "type": "primary",
-                        "value": {
-                            "action": "save_todo_one",
-                            "chat_id": chat_id,
-                            "index": i,
-                            "saved_count": saved_count,
-                        },
-                    }],
-                },
-            ],
-        })
-
-    title_text = (f"✅ 已新增 {saved_count} 条，还剩 {len(todos)} 条"
-                  if saved_count > 0
-                  else f"📋 建议新增 {len(todos)} 条待办")
-    elements.extend([
-        {"tag": "hr"},
-        {
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "✓ 全部新增"},
-                    "type": "primary",
-                    "value": {"action": "save_todo_all", "chat_id": chat_id,
-                              "saved_count": saved_count},
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "✗ 跳过"},
-                    "type": "danger",
-                    "value": {"action": "skip_todos", "chat_id": chat_id},
-                },
-            ],
-        },
-    ])
-    header_color = "green" if saved_count > 0 else "blue"
-    return _card(elements, header=_header(title_text, header_color), forward=False)
-
-
-async def send_todo_confirm_card(chat_id: str, todos: list[dict],
-                                  app_id: str, app_secret: str):
-    token = await get_tenant_token(app_id, app_secret)
-    card = build_todo_confirm_card(todos, chat_id)
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            f"{FEISHU_BASE}/im/v1/messages",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"receive_id_type": "chat_id"},
-            json={"receive_id": chat_id, "msg_type": "interactive",
-                  "content": json.dumps(card)},
-        )
-
-
-def card_todo_saved_response(count: int) -> dict:
-    return _resp("success", f"已新增 {count} 条待办",
-                 [_md(f"✅ 已新增 {count} 条待办。用 /todo list 查看。")])
-
-
-def card_todo_one_saved_response(title: str, remaining: list[dict],
-                                  chat_id: str, saved_count: int) -> dict:
-    updated = build_todo_confirm_card(remaining, chat_id, saved_count)
-    return {
-        "toast": {"type": "success", "content": f"已新增：{title[:20]}"},
-        "card": {"type": "raw", "data": updated},
-    }
-
-
-def card_todo_skipped_response() -> dict:
-    return _resp("info", "已跳过", [_md("⏭ 已跳过待办建议。")])
 
 
 # ── Merge 确认卡片 ─────────────────────────────────────────────
@@ -592,24 +387,21 @@ def build_merge_confirm_card(merges: list[dict], chat_id: str,
                   else f"🔀 建议合并 {len(merges)} 组信息")
     elements.extend([
         {"tag": "hr"},
-        {
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "✓ 全部合并"},
-                    "type": "primary",
-                    "value": {"action": "merge_all", "chat_id": chat_id,
-                              "saved_count": saved_count},
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "✗ 跳过"},
-                    "type": "danger",
-                    "value": {"action": "skip_merges", "chat_id": chat_id},
-                },
-            ],
-        },
+        _button_row([
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "✓ 全部合并"},
+                "type": "primary",
+                "value": {"action": "merge_all", "chat_id": chat_id,
+                          "saved_count": saved_count},
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "✗ 跳过"},
+                "type": "danger",
+                "value": {"action": "skip_merges", "chat_id": chat_id},
+            },
+        ]),
     ])
     header_color = "green" if saved_count > 0 else "blue"
     return _card(elements, header=_header(title_text, header_color), forward=False)
@@ -708,24 +500,21 @@ def build_action_confirm_card(actions: list[dict], chat_id: str,
                   else f"⚙️ 建议处理 {len(actions)} 项风险/待办")
     elements.extend([
         {"tag": "hr"},
-        {
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "✓ 全部处理"},
-                    "type": "primary",
-                    "value": {"action": "review_action_all", "chat_id": chat_id,
-                              "saved_count": saved_count},
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "✗ 跳过"},
-                    "type": "danger",
-                    "value": {"action": "skip_review_actions", "chat_id": chat_id},
-                },
-            ],
-        },
+        _button_row([
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "✓ 全部处理"},
+                "type": "primary",
+                "value": {"action": "review_action_all", "chat_id": chat_id,
+                          "saved_count": saved_count},
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "✗ 跳过"},
+                "type": "danger",
+                "value": {"action": "skip_review_actions", "chat_id": chat_id},
+            },
+        ]),
     ])
     header_color = "green" if saved_count > 0 else "blue"
     return _card(elements, header=_header(title_text, header_color), forward=False)
@@ -773,105 +562,254 @@ _TYPE_TAG = {
 }
 
 
-def build_command_confirm_card(commands: list[dict], chat_id: str,
-                               saved_count: int = 0) -> dict:
-    elements = []
-    for i, item in enumerate(commands[:10]):
-        title = item.get("title") or item.get("command", "")
-        command = item.get("command", "")
-        desc = item.get("description", "")
-        preview = command if len(command) <= 90 else command[:87] + "..."
-        desc_line = f"\n{desc}" if desc else ""
+# ── AI 建议确认卡片（统一入口）────────────────────────────────
 
-        elements.append({
-            "tag": "column_set",
-            "flex_mode": "none",
-            "columns": [
-                {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 5,
-                    "elements": [_lark_div(
-                        f"**{i + 1}. {title}**{desc_line}\n`{preview}`"
-                    )],
-                },
-                {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 1,
-                    "elements": [{
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "执行"},
-                        "type": "primary",
-                        "value": {
-                            "action": "command_one",
-                            "chat_id": chat_id,
-                            "index": i,
-                            "saved_count": saved_count,
-                        },
-                    }],
-                },
-            ],
-        })
+_SUGGESTION_SECTIONS = [
+    ("risk_fact",    "⚠️ 风险 / 问题"),
+    ("schedule_fact","📅 里程碑"),
+    ("other_fact",   "📋 知识 / 决策 / 信息"),
+    ("todo",         "☐ 待办事项"),
+    ("update",       "✏️ 更新建议"),
+]
 
-    title_text = (f"已执行 {saved_count} 项，还剩 {len(commands)} 项"
-                  if saved_count > 0
-                  else f"AI 建议执行 {len(commands)} 项更新")
-    elements.extend([
-        {"tag": "hr"},
-        {
-            "tag": "action",
-            "actions": [
+
+def _suggestion_group(item: dict) -> str:
+    kind = item.get("kind", "")
+    if kind == "new_todo":
+        return "todo"
+    if kind in ("update_fact", "update_todo"):
+        return "update"
+    ftype = item.get("type", "knowledge")
+    if ftype in ("risk", "issue", "blocker", "dependency"):
+        return "risk_fact"
+    if ftype == "milestone":
+        return "schedule_fact"
+    return "other_fact"
+
+
+def _suggestion_row_text(item: dict) -> str:
+    kind = item.get("kind", "")
+    status = item.get("status", "pending")
+    status_tag = " ✅" if status == "saved" else (" ⏭" if status == "skipped" else "")
+
+    if kind == "new_fact":
+        type_label = _TYPE_LABELS.get(item.get("type", ""), item.get("type", ""))
+        prio_icon = _PRIO_ICON.get(item.get("priority", ""), "")
+        prio_label = _PRIO_ZH2.get(item.get("priority", ""), "")
+        parts = []
+        if prio_label:
+            parts.append(f"{prio_icon} {prio_label}")
+        if item.get("owner"):
+            parts.append(f"负责人：{item['owner']}")
+        if item.get("due_date"):
+            parts.append(f"截止：{item['due_date']}")
+        meta = "  ".join(parts) if parts else "待填写"
+        return f"**[{type_label}] {item.get('title', '')}**{status_tag}\n{meta}"
+
+    if kind == "new_todo":
+        prio_icon = _PRIO_ICON.get(item.get("priority", ""), "")
+        prio_label = _PRIO_ZH2.get(item.get("priority", ""), "")
+        parts = []
+        if prio_label:
+            parts.append(f"{prio_icon} {prio_label}")
+        if item.get("owner"):
+            parts.append(f"负责人：{item['owner']}")
+        if item.get("due_date"):
+            parts.append(f"截止：{item['due_date']}")
+        meta = "  ".join(parts) if parts else "待填写"
+        return f"**{item.get('title', '')}**{status_tag}\n{meta}"
+
+    # update_fact / update_todo
+    prefix = "#T" if kind == "update_todo" else "#"
+    entity_title = item.get("entity_title", "")
+    field = item.get("field", "")
+    old_v = item.get("old_value", "—")
+    new_v = item.get("value", "")
+    reason = item.get("reason", "")[:30]
+    return (
+        f"**{prefix}{item.get('id', '')} {entity_title}**{status_tag}\n"
+        f"{field}：{old_v} → {new_v}  {reason}"
+    )
+
+
+def build_ai_suggestions_card(items: list[dict], chat_id: str) -> dict:
+    """AI建议确认卡片：按类型分组，实时状态更新，支持逐条/批量保存跳过。"""
+    groups: dict[str, list[tuple[int, dict]]] = {k: [] for k, _ in _SUGGESTION_SECTIONS}
+    for i, item in enumerate(items[:10]):
+        groups[_suggestion_group(item)].append((i, item))
+
+    elements: list[dict] = []
+    for group_key, group_title in _SUGGESTION_SECTIONS:
+        group_items = groups[group_key]
+        if not group_items:
+            continue
+        elements.append(_md(f"**{group_title}**"))
+        for idx, item in group_items:
+            elements.append({
+                "tag": "column_set",
+                "flex_mode": "none",
+                "columns": [
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 5,
+                        "elements": [_lark_div(_suggestion_row_text(item))],
+                    },
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "vertical_align": "center",
+                        "elements": [{
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "详情"},
+                            "type": "default",
+                            "value": {"action": "suggestion_view_detail",
+                                      "chat_id": chat_id, "index": idx},
+                        }],
+                    },
+                ],
+            })
+        elements.append({"tag": "hr"})
+
+    if elements and elements[-1]["tag"] == "hr":
+        elements.pop()
+
+    total = len(items)
+    n_saved = sum(1 for x in items if x.get("status") == "saved")
+    n_skipped = sum(1 for x in items if x.get("status") == "skipped")
+    processed = n_saved + n_skipped
+
+    if processed >= total and total > 0:
+        title_text = f"✅ AI 建议处理完毕（保存 {n_saved} · 跳过 {n_skipped}）"
+        header_color = "green"
+        elements.append({"tag": "hr"})
+        elements.append(_md(
+            f"共处理 {total} 项 AI 建议：新增/更新 {n_saved} 项，跳过 {n_skipped} 项。"
+        ))
+    else:
+        title_text = (
+            f"💡 AI 建议（已处理 {processed}/{total}）" if processed > 0
+            else f"💡 AI 建议（{total} 项）"
+        )
+        header_color = "green" if processed > 0 else "blue"
+        elements.extend([
+            {"tag": "hr"},
+            _button_row([
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "全部执行"},
+                    "text": {"tag": "plain_text", "content": "全部保存"},
                     "type": "primary",
-                    "value": {"action": "command_all", "chat_id": chat_id,
-                              "saved_count": saved_count},
+                    "value": {"action": "suggestion_save_all", "chat_id": chat_id},
                 },
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "跳过"},
+                    "text": {"tag": "plain_text", "content": "全部跳过"},
                     "type": "danger",
-                    "value": {"action": "skip_commands", "chat_id": chat_id},
+                    "value": {"action": "suggestion_skip_all", "chat_id": chat_id},
                 },
-            ],
-        },
-    ])
-    header_color = "green" if saved_count > 0 else "blue"
+            ]),
+        ])
+
     return _card(elements, header=_header(title_text, header_color), forward=False)
 
 
-async def send_command_confirm_card(chat_id: str, commands: list[dict],
-                                    app_id: str, app_secret: str):
-    token = await get_tenant_token(app_id, app_secret)
-    card = build_command_confirm_card(commands, chat_id)
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            f"{FEISHU_BASE}/im/v1/messages",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"receive_id_type": "chat_id"},
-            json={"receive_id": chat_id, "msg_type": "interactive",
-                  "content": json.dumps(card)},
+def build_suggestion_detail_card(item: dict, chat_id: str, index: int) -> dict:
+    """AI建议详情卡片：显示完整信息，提供保存/跳过/返回操作。"""
+    kind = item.get("kind", "")
+    status = item.get("status", "pending")
+    done = status in ("saved", "skipped")
+
+    if kind == "new_fact":
+        type_label = _TYPE_LABELS.get(item.get("type", ""), item.get("type", ""))
+        prio_icon = _PRIO_ICON.get(item.get("priority", ""), "")
+        prio_label = _PRIO_ZH2.get(item.get("priority", ""), "—")
+        meta = (
+            f"**建议操作**  新增\n"
+            f"**类型**  {type_label}\n"
+            f"**优先级**  {prio_icon} {prio_label}\n"
+            f"**负责人**  {item.get('owner') or '—'}\n"
+            f"**截止**  {item.get('due_date') or '—'}"
         )
+        elements: list[dict] = [_md(meta)]
+        if item.get("body"):
+            elements.extend([{"tag": "hr"}, _md(item["body"])])
+        header_text = f"新增 [{type_label}] {item.get('title', '')[:40]}"
+        header_color = "blue"
 
+    elif kind == "new_todo":
+        prio_icon = _PRIO_ICON.get(item.get("priority", ""), "")
+        prio_label = _PRIO_ZH2.get(item.get("priority", ""), "—")
+        meta_lines = [
+            f"**建议操作**  新增待办",
+            f"**优先级**  {prio_icon} {prio_label}",
+            f"**负责人**  {item.get('owner') or '—'}",
+            f"**截止**  {item.get('due_date') or '—'}",
+        ]
+        if item.get("source_fact_id"):
+            meta_lines.append(f"**关联风险**  #{item['source_fact_id']}")
+        if item.get("plan_id"):
+            meta_lines.append(f"**挂载里程碑**  #{item['plan_id']}")
+        elements = [_md("\n".join(meta_lines))]
+        if item.get("body"):
+            elements.extend([{"tag": "hr"}, _md(item["body"])])
+        header_text = f"新增待办：{item.get('title', '')[:40]}"
+        header_color = "blue"
 
-def card_command_saved_response(count: int) -> dict:
-    return _resp("success", f"已执行 {count} 项",
-                 [_md(f"已执行 {count} 项更新。")])
+    else:  # update_fact / update_todo
+        prefix = "#T" if kind == "update_todo" else "#"
+        entity_title = item.get("entity_title", "")
+        field = item.get("field", "")
+        old_v = item.get("old_value", "—")
+        new_v = item.get("value", "")
+        reason = item.get("reason", "")
+        meta = (
+            f"**建议操作**  更新字段\n"
+            f"**目标**  {prefix}{item.get('id', '')} {entity_title}\n"
+            f"**字段**  {field}\n"
+            f"**当前值**  {old_v}\n"
+            f"**新值**  {new_v}\n"
+            f"**原因**  {reason}"
+        )
+        elements = [_md(meta)]
+        header_text = f"更新 {prefix}{item.get('id', '')} {entity_title[:30]}"
+        header_color = "yellow"
 
+    elements.append({"tag": "hr"})
+    btns: list[dict] = [{
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "返回清单"},
+        "type": "default",
+        "value": {"action": "suggestion_back_to_list", "chat_id": chat_id},
+    }]
+    if not done:
+        btns.extend([
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "保存"},
+                "type": "primary",
+                "value": {"action": "suggestion_save_one",
+                          "chat_id": chat_id, "index": index},
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "跳过"},
+                "type": "danger",
+                "value": {"action": "suggestion_skip_one",
+                          "chat_id": chat_id, "index": index},
+            },
+        ])
+    else:
+        btns.append({
+            "tag": "button",
+            "text": {"tag": "plain_text",
+                     "content": "已保存" if status == "saved" else "已跳过"},
+            "type": "default",
+            "value": {"action": "suggestion_back_to_list", "chat_id": chat_id},
+        })
+    elements.append(_button_row(btns))
 
-def card_command_one_saved_response(item: dict, remaining: list[dict],
-                                    chat_id: str, saved_count: int) -> dict:
-    updated = build_command_confirm_card(remaining, chat_id, saved_count)
-    return {
-        "toast": {"type": "success", "content": f"已执行：{item.get('title', '')[:20]}"},
-        "card": {"type": "raw", "data": updated},
-    }
-
-
-def card_command_skipped_response() -> dict:
-    return _resp("info", "已跳过", [_md("已跳过 AI 建议的更新。")])
+    return _card(elements, header=_header(header_text, header_color), forward=False)
 
 
 def build_risk_list_card(rows: list, status_filter: str = "open") -> dict:
@@ -954,6 +892,20 @@ def build_risk_show_card(fact: dict, open_todos: list) -> dict:
     return _card(elements,
                  header=_header(f"#{fact['id']} {fact['title']}", "red"),
                  forward=False)
+
+
+def build_fact_show_card(fact: dict) -> dict:
+    """Generic fact detail card for command confirmation flow."""
+    type_label = _TYPE_TAG.get(fact.get("type", ""), fact.get("type", "fact"))
+    prio_label = _PRIO_ZH2.get(fact.get("priority", ""), fact.get("priority") or "--")
+    meta_lines = [
+        f"**类型**  {type_label}    **状态**  {fact.get('status') or 'active'}",
+        f"**优先级**  {prio_label}    **负责人**  {fact.get('owner') or '--'}",
+        f"**截止**  {fact.get('due_date') or '--'}    **项目**  {fact.get('project') or '--'}",
+        f"**创建**  {fact.get('created_at', '')[:16]}    **更新**  {fact.get('updated_at', '')[:16]}",
+    ]
+    elements = [_md("\n".join(meta_lines)), {"tag": "hr"}, _md(fact.get("body") or "（无正文）")]
+    return _card(elements, header=_header(f"#{fact['id']} {fact.get('title','')}", "blue"), forward=False)
 
 
 def build_todo_list_card(rows: list) -> dict:
@@ -1139,7 +1091,7 @@ def build_clarify_card(question: str, opts: list[str], chat_id: str,
                     "sender_open_id": sender_open_id,
                 },
             })
-        elements.append({"tag": "action", "actions": btn_actions})
+        elements.append(_button_row(btn_actions))
     elements.append({"tag": "hr"})
     elements.append(_md("💬 也可以直接发送文字回复，我会根据你的回复继续作答。"))
     return _card(elements, header=_header("需要确认一些信息", "yellow"), forward=False)

@@ -253,6 +253,24 @@ def _strip_clarify(text: str) -> str:
     return text
 
 
+_EXECUTION_CLAIM_RE = re.compile(r"(已确认|已更新|已保存|已执行)")
+
+
+def _sanitize_ai_execution_claims(text: str) -> str:
+    """Prevent AI from claiming DB changes were already executed in chat mode."""
+    has_claim = bool(_EXECUTION_CLAIM_RE.search(text))
+    has_command = any(
+        line.strip().startswith(("/todo", "/risk", "/admin"))
+        for line in text.splitlines()
+    )
+    if not has_claim or has_command:
+        return text
+    return (
+        "提示：以下内容是建议，系统尚未执行数据库更新。请通过确认卡片或命令确认后再落库。\n\n"
+        + text
+    )
+
+
 def _strip_merge_candidates_json(report: str) -> str:
     for start_marker, end_marker in (
         ("===MERGE_CANDIDATES_JSON===", "===END_MERGE_CANDIDATES_JSON==="),
@@ -446,35 +464,6 @@ async def _handle_card_callback(body: dict) -> dict:
     chat_id = value.get("chat_id", "")
     log.info("card callback action=%s chat_id=%s", action, chat_id)
 
-    if action == "save_one":
-        index = int(value.get("index", -1))
-        saved_count = int(value.get("saved_count", 0))
-        saved, remaining = db.pop_pending_item(chat_id, index)
-        if saved:
-            _save_fact_item(saved)
-            saved_count += 1
-            if remaining:
-                return feishu.card_one_saved_response(saved, remaining, chat_id, saved_count)
-            return feishu.card_saved_response(saved_count)
-        return feishu.card_skipped_response()
-
-    pending = db.get_pending(chat_id)
-    if action == "save_all" and pending:
-        prev_saved = int(value.get("saved_count", 0))
-        for item in pending:
-            _save_fact_item(item)
-        db.clear_pending(chat_id)
-        return feishu.card_saved_response(prev_saved + len(pending))
-
-    # ── 待办确认卡片 ──
-    if action == "save_todo_one":
-        return await _card_save_todo_one(value, chat_id)
-    if action == "save_todo_all":
-        return _card_save_todo_all(value, chat_id)
-    if action == "skip_todos":
-        db.clear_pending_todos(chat_id)
-        return feishu.card_todo_skipped_response()
-
     # ── 合并确认卡片 ──
     if action == "merge_one":
         return _card_merge_one(value, chat_id)
@@ -493,15 +482,30 @@ async def _handle_card_callback(body: dict) -> dict:
         db.clear_pending_actions(chat_id)
         return feishu.card_action_skipped_response()
 
-    if action == "command_one":
-        return _card_command_one(value, chat_id)
-    if action == "command_all":
-        return _card_command_all(value, chat_id)
-    if action == "skip_commands":
-        db.clear_pending_commands(chat_id)
-        return feishu.card_command_skipped_response()
+    # ── AI 建议确认卡片 ──
+    if action == "suggestion_save_one":
+        return _card_suggestion_save_one(value, chat_id)
+    if action == "suggestion_skip_one":
+        return _card_suggestion_skip_one(value, chat_id)
+    if action == "suggestion_save_all":
+        return _card_suggestion_save_all(value, chat_id)
+    if action == "suggestion_skip_all":
+        return _card_suggestion_skip_all(value, chat_id)
+    if action == "suggestion_view_detail":
+        index = int(value.get("index", -1))
+        items = db.get_pending_commands(chat_id)
+        if index < 0 or index >= len(items):
+            return feishu.card_skipped_response()
+        return {
+            "toast": {"type": "info", "content": "已打开详情"},
+            "card": {"type": "raw", "data": feishu.build_suggestion_detail_card(items[index], chat_id, index)},
+        }
+    if action == "suggestion_back_to_list":
+        return {
+            "toast": {"type": "info", "content": "已返回建议清单"},
+            "card": _card_suggestions_update(chat_id),
+        }
 
-    db.clear_pending(chat_id)
     return feishu.card_skipped_response()
 
 
@@ -518,32 +522,6 @@ def _save_todo_item(t: dict):
         source="ai",
     )
 
-
-async def _card_save_todo_one(value: dict, chat_id: str) -> dict:
-    index = int(value.get("index", -1))
-    saved_count = int(value.get("saved_count", 0))
-    saved, remaining = db.pop_pending_todo(chat_id, index)
-    if saved:
-        _save_todo_item(saved)
-        saved_count += 1
-        if remaining:
-            return feishu.card_todo_one_saved_response(
-                saved["title"], remaining, chat_id, saved_count
-            )
-        return feishu.card_todo_saved_response(saved_count)
-    return feishu.card_todo_skipped_response()
-
-
-def _card_save_todo_all(value: dict, chat_id: str) -> dict:
-    prev_saved = int(value.get("saved_count", 0))
-    pending = db.get_pending_todos(chat_id)
-    if pending:
-        for t in pending:
-            _save_todo_item(t)
-        db.clear_pending_todos(chat_id)
-        return feishu.card_todo_saved_response(prev_saved + len(pending))
-    db.clear_pending_todos(chat_id)
-    return feishu.card_todo_skipped_response()
 
 
 def _apply_merge_item(item: dict):
@@ -631,6 +609,8 @@ def _card_review_action_all(value: dict, chat_id: str) -> dict:
 
 def _extract_command_candidates(text: str, sender_open_id: str,
                                 project: str | None) -> list[dict]:
+    # Legacy command extraction — kept for potential future use but no longer called in main flow.
+    return []
     candidates: list[dict] = []
     seen: set[str] = set()
     user_role = (db.get_user(sender_open_id) or {}).get("role", "")
@@ -639,10 +619,117 @@ def _extract_command_candidates(text: str, sender_open_id: str,
         re.compile(r"^/admin\s+fact\s+archive\s+\d+\s*$", re.I),
         re.compile(r"^/admin\s+fact\s+add\s+(risk|issue|milestone|decision|team|client|knowledge|process|org)\s+.+$", re.I),
         re.compile(r"^/risk\s+add\s+(risk|issue|blocker|dependency)\s+(high|medium|low)\s+.+$", re.I),
+        re.compile(r"^/risk\s+owner\s+\d+\s+.+$", re.I),
+        re.compile(r"^/risk\s+(close|reopen)\s+\d+\s*$", re.I),
         re.compile(r"^/todo\s+update\s+\d+\s+(title|body|priority|owner|due_date)\s+.+$", re.I),
         re.compile(r"^/todo\s+(done|cancel)\s+\d+\s*$", re.I),
         re.compile(r"^/todo\s+(?!list\b|show\b|help\b).+", re.I),
     )
+    def describe_command(cmd: str) -> str:
+        m = re.match(r"^/risk\s+owner\s+(\d+)\s+(.+)$", cmd, re.I)
+        if m:
+            rid = int(m.group(1))
+            new_owner = m.group(2).strip()
+            fact = db.get_fact(rid)
+            if fact:
+                old_owner = fact.get("owner") or "未设置"
+                return f"目标：风险 #{rid}《{fact.get('title','')}》；负责人：{old_owner} -> {new_owner}"
+            return f"目标：风险 #{rid}（未找到详情）"
+
+        m = re.match(r"^/risk\s+(close|reopen)\s+(\d+)$", cmd, re.I)
+        if m:
+            action = m.group(1).lower()
+            rid = int(m.group(2))
+            fact = db.get_fact(rid)
+            if fact:
+                status = fact.get("status") or "unknown"
+                target = "closed" if action == "close" else "open"
+                return f"目标：风险 #{rid}《{fact.get('title','')}》；状态：{status} -> {target}"
+            return f"目标：风险 #{rid}（未找到详情）"
+
+        m = re.match(r"^/admin\s+fact\s+update\s+(\d+)\s+([a-z_]+)\s+(.+)$", cmd, re.I)
+        if m:
+            fid = int(m.group(1))
+            field = m.group(2).lower()
+            new_val = m.group(3).strip()
+            fact = db.get_fact(fid)
+            if fact:
+                old_val = fact.get(field) if field in fact.keys() else ""
+                old_show = old_val if old_val not in (None, "") else "未设置"
+                return f"目标：#{fid}《{fact.get('title','')}》；{field}：{old_show} -> {new_val}"
+            return f"目标：事实 #{fid}（未找到详情）"
+
+        m = re.match(r"^/admin\s+fact\s+archive\s+(\d+)$", cmd, re.I)
+        if m:
+            fid = int(m.group(1))
+            fact = db.get_fact(fid)
+            if fact:
+                return f"目标：#{fid}《{fact.get('title','')}》；状态 -> archived"
+            return f"目标：事实 #{fid}（未找到详情）"
+
+        m = re.match(r"^/todo\s+update\s+(\d+)\s+([a-z_]+)\s+(.+)$", cmd, re.I)
+        if m:
+            tid = int(m.group(1))
+            field = m.group(2).lower()
+            new_val = m.group(3).strip()
+            todo = db.get_todo(tid)
+            if todo:
+                old_val = todo.get(field) if field in todo.keys() else ""
+                old_show = old_val if old_val not in (None, "") else "未设置"
+                return f"目标：#T{tid}《{todo.get('title','')}》；{field}：{old_show} -> {new_val}"
+            return f"目标：待办 #T{tid}（未找到详情）"
+
+        m = re.match(r"^/todo\s+(done|cancel)\s+(\d+)$", cmd, re.I)
+        if m:
+            action = m.group(1).lower()
+            tid = int(m.group(2))
+            todo = db.get_todo(tid)
+            if todo:
+                status = "done" if action == "done" else "cancelled"
+                return f"目标：#T{tid}《{todo.get('title','')}》；状态 -> {status}"
+            return f"目标：待办 #T{tid}（未找到详情）"
+
+        m = re.match(r"^/todo\s+(.+?)\s+(risk|plan)\s+(\d+)\s*$", cmd, re.I)
+        if m:
+            bind_type = m.group(2).lower()
+            bind_id = int(m.group(3))
+            if bind_type == "risk":
+                fact = db.get_fact(bind_id)
+                if fact:
+                    return f"关联：风险 #{bind_id}《{fact.get('title','')}》"
+            if bind_type == "plan":
+                fact = db.get_fact(bind_id)
+                if fact:
+                    return f"关联：里程碑 #{bind_id}《{fact.get('title','')}》"
+            return f"关联：{bind_type} #{bind_id}"
+
+        # Generic fallback: extract first numeric ID and try to resolve entity title.
+        nums = re.findall(r"\b\d+\b", cmd)
+        if nums:
+            item_id = int(nums[0])
+            if cmd.startswith("/todo"):
+                todo = db.get_todo(item_id)
+                if todo:
+                    return f"目标：#T{item_id}《{todo.get('title','')}》"
+            fact = db.get_fact(item_id)
+            if fact:
+                return f"目标：#{item_id}《{fact.get('title','')}》"
+            return f"目标：#{item_id}（未找到详情）"
+
+        return ""
+
+    def target_of_command(cmd: str) -> tuple[str, int] | tuple[None, None]:
+        m = re.match(r"^/risk\s+(owner|close|reopen)\s+(\d+)\b", cmd, re.I)
+        if m:
+            return "risk", int(m.group(2))
+        m = re.match(r"^/admin\s+fact\s+(update|archive)\s+(\d+)\b", cmd, re.I)
+        if m:
+            return "fact", int(m.group(2))
+        m = re.match(r"^/todo\s+(update|done|cancel)\s+(\d+)\b", cmd, re.I)
+        if m:
+            return "todo", int(m.group(2))
+        return None, None
+
     for line in text.splitlines():
         cmd = line.strip().strip("`")
         cmd = re.sub(r"^[-*•]\s+", "", cmd)
@@ -667,15 +754,45 @@ def _extract_command_candidates(text: str, sender_open_id: str,
             title = "新增知识库条目"
         elif cmd.startswith("/risk add"):
             title = "新增风险"
+        elif cmd.startswith("/risk owner"):
+            title = "更新风险负责人"
+        elif re.match(r"^/risk\s+(close|reopen)\b", cmd, re.I):
+            title = "更新风险状态"
         elif cmd.startswith("/todo update"):
             title = "更新待办"
         elif re.match(r"^/todo\s+(done|cancel)\b", cmd, re.I):
             title = "处理待办"
         else:
             title = "新增待办"
+        target_kind, target_id = target_of_command(cmd)
+        target_meta: dict = {}
+        if target_kind == "risk" and target_id:
+            fact = db.get_fact(int(target_id))
+            if fact:
+                target_meta = {
+                    "id": int(fact.get("id", 0) or 0),
+                    "title": fact.get("title", ""),
+                    "type": fact.get("type", ""),
+                    "priority": fact.get("priority", ""),
+                    "owner": fact.get("owner", ""),
+                    "due_date": fact.get("due_date", ""),
+                }
+        command_type = "other"
+        if cmd.startswith("/risk"):
+            command_type = "risk"
+        elif cmd.startswith("/todo"):
+            command_type = "todo"
+        elif cmd.startswith("/admin fact"):
+            command_type = "fact"
         candidates.append({
             "command": cmd,
             "title": title,
+            "description": describe_command(cmd),
+            "target_kind": target_kind or "",
+            "target_id": int(target_id) if target_id else 0,
+            "target_meta": target_meta,
+            "command_type": command_type,
+            "status": "pending",
             "sender_open_id": sender_open_id,
             "project": project,
         })
@@ -696,40 +813,292 @@ def _execute_confirmed_command(item: dict) -> str:
     raise ValueError(f"unsupported command: {cmd}")
 
 
-def _card_command_one(value: dict, chat_id: str) -> dict:
+def _get_command_list(chat_id: str) -> list[dict]:
+    return db.get_pending_commands(chat_id)
+
+
+def _save_command_list(chat_id: str, items: list[dict]):
+    db.save_pending_commands(chat_id, items)
+
+
+def _count_processed_commands(items: list[dict]) -> int:
+    return sum(1 for x in items if x.get("status") in ("saved", "skipped"))
+
+
+def _build_command_preview(item: dict) -> str:
+    if item.get("suggestion_kind") == "fact":
+        fact_item = item.get("fact_item", {}) or {}
+        ftype = fact_item.get("type", "knowledge")
+        content = fact_item.get("content", "")
+        action = fact_item.get("action", "new")
+        if action == "update":
+            fid = fact_item.get("fact_id")
+            ftitle = fact_item.get("fact_title", "")
+            return (
+                f"**建议类型**\n知识库更新\n\n"
+                f"**目标**\n#{fid} {ftitle}\n\n"
+                f"**变更点**\n追加信息：{content[:300]}"
+            )
+        return (
+            f"**建议类型**\n知识库新增\n\n"
+            f"**分类**\n{ftype}\n\n"
+            f"**变更点**\n{content[:300]}"
+        )
+    cmd = item.get("command", "").strip()
+    lines = [f"**建议命令**\n`{cmd}`"]
+    lines.append(f"\n**说明**\n{item.get('description') or '—'}")
+    m = re.match(r"^/risk\s+owner\s+(\d+)\s+(.+)$", cmd, re.I)
+    if m:
+        rid = int(m.group(1))
+        new_owner = m.group(2).strip()
+        fact = db.get_fact(rid)
+        if fact:
+            lines.append(
+                f"\n**更新后预览（风险 #{rid}）**\n"
+                f"标题：{fact.get('title','')}\n"
+                f"负责人：~~{fact.get('owner') or '未设置'}~~ **{new_owner}**"
+            )
+        return "\n".join(lines)
+    m = re.match(r"^/admin\s+fact\s+update\s+(\d+)\s+([a-z_]+)\s+(.+)$", cmd, re.I)
+    if m:
+        fid = int(m.group(1)); field = m.group(2).lower(); new_val = m.group(3).strip()
+        fact = db.get_fact(fid)
+        if fact:
+            old = fact.get(field) if field in fact.keys() else ""
+            lines.append(
+                f"\n**更新后预览（条目 #{fid}）**\n"
+                f"标题：{fact.get('title','')}\n"
+                f"{field}：~~{old or '未设置'}~~ **{new_val}**"
+            )
+        return "\n".join(lines)
+    m = re.match(r"^/todo\s+update\s+(\d+)\s+([a-z_]+)\s+(.+)$", cmd, re.I)
+    if m:
+        tid = int(m.group(1)); field = m.group(2).lower(); new_val = m.group(3).strip()
+        todo = db.get_todo(tid)
+        if todo:
+            old = todo.get(field) if field in todo.keys() else ""
+            lines.append(
+                f"\n**更新后预览（待办 #T{tid}）**\n"
+                f"标题：{todo.get('title','')}\n"
+                f"{field}：~~{old or '未设置'}~~ **{new_val}**"
+            )
+        return "\n".join(lines)
+    return "\n".join(lines + ["\n**更新后预览**\n请按命令执行结果为准。"])
+
+
+# ── AI 建议（===SUGGESTIONS===）解析与保存 ──────────────────────
+
+def _extract_suggestions(text: str) -> list[dict] | None:
+    """从 AI 回复中解析 ===SUGGESTIONS=== 块，返回 items 或 None。"""
+    start = text.find("===SUGGESTIONS===")
+    end   = text.find("===END_SUGGESTIONS===")
+    if start < 0 or end < 0 or end <= start:
+        return None
+    raw = text[start + len("===SUGGESTIONS==="):end].strip()
+    try:
+        data = json.loads(raw)
+        items = data.get("items", [])
+        return items if isinstance(items, list) else None
+    except Exception:
+        log.warning("failed to parse SUGGESTIONS JSON: %r", raw[:200])
+        return None
+
+
+def _strip_suggestions(text: str) -> str:
+    """从 AI 回复中剔除 ===SUGGESTIONS=== 块。"""
+    start = text.find("===SUGGESTIONS===")
+    end   = text.find("===END_SUGGESTIONS===")
+    if start >= 0 and end > start:
+        text = (text[:start] + text[end + len("===END_SUGGESTIONS==="):]).strip()
+    return text
+
+
+def _enrich_suggestions(items: list[dict], project: str | None) -> list[dict]:
+    """为建议条目补充 DB 查询信息（update 类型补充现有值和实体标题）。"""
+    _ALLOWED_UPDATE_FIELDS = {"owner", "priority", "due_date", "status"}
+    _VALID_STATUS = {"resolved", "active", "archived"}
+    _VALID_PRIO   = {"high", "medium", "low"}
+    _VALID_KINDS  = {"new_fact", "new_todo", "update_fact", "update_todo"}
+    _VALID_TYPES  = {"risk", "issue", "blocker", "dependency", "milestone",
+                     "decision", "knowledge", "team", "client", "process", "org"}
+
+    enriched = []
+    for raw in items:
+        item = dict(raw)
+        kind = item.get("kind", "")
+        if kind not in _VALID_KINDS:
+            continue
+
+        item["project"] = project or "yadi"
+        item.setdefault("status", "pending")
+
+        if kind == "new_fact":
+            if item.get("type") not in _VALID_TYPES:
+                item["type"] = "knowledge"
+            if item.get("priority") not in _VALID_PRIO:
+                item["priority"] = ""
+
+        elif kind == "new_todo":
+            if item.get("priority") not in _VALID_PRIO:
+                item["priority"] = "medium"
+
+        elif kind in ("update_fact", "update_todo"):
+            field = item.get("field", "")
+            if field not in _ALLOWED_UPDATE_FIELDS:
+                continue
+            value = str(item.get("value", ""))
+            if field == "status" and value not in _VALID_STATUS:
+                continue
+            if field == "priority" and value not in _VALID_PRIO:
+                continue
+            # Enrich with current entity info
+            eid = item.get("id")
+            if eid:
+                if kind == "update_fact":
+                    fact = db.get_fact(int(eid))
+                    if fact:
+                        item["entity_title"] = fact.get("title", "")
+                        item["old_value"] = fact.get(field) or "—"
+                    else:
+                        continue  # skip non-existent entity
+                else:
+                    todo = db.get_todo(int(eid))
+                    if todo:
+                        item["entity_title"] = todo.get("title", "")
+                        item["old_value"] = todo.get(field) or "—"
+                    else:
+                        continue
+
+        enriched.append(item)
+    return enriched[:10]
+
+
+def _save_suggestion_item(item: dict) -> bool:
+    """将一条 AI 建议写入数据库，返回是否成功。"""
+    kind    = item.get("kind", "")
+    project = item.get("project", "yadi")
+    try:
+        if kind == "new_fact":
+            ftype = item.get("type", "knowledge")
+            title = item.get("title", "") or item.get("body", "")[:20] or "未命名"
+            db.add_fact(
+                ftype, title, item.get("body", ""),
+                priority=item.get("priority", ""),
+                owner=item.get("owner", ""),
+                due_date=item.get("due_date", ""),
+                source="ai",
+                project=project,
+            )
+        elif kind == "new_todo":
+            db.add_todo(
+                item.get("title", ""),
+                body=item.get("body", ""),
+                priority=item.get("priority", "medium"),
+                owner=item.get("owner", ""),
+                due_date=item.get("due_date", ""),
+                project=project,
+                source_fact_id=item.get("source_fact_id"),
+                plan_id=item.get("plan_id"),
+                source="ai",
+            )
+        elif kind == "update_fact":
+            fid   = int(item.get("id", 0))
+            field = item.get("field", "")
+            value = item.get("value", "")
+            if fid and field:
+                db.update_fact(fid, **{field: value})
+        elif kind == "update_todo":
+            tid   = int(item.get("id", 0))
+            field = item.get("field", "")
+            value = item.get("value", "")
+            if tid and field:
+                db.update_todo(tid, **{field: value})
+        return True
+    except Exception:
+        log.exception("_save_suggestion_item error kind=%s", kind)
+        return False
+
+
+def _card_suggestions_update(chat_id: str) -> dict:
+    """返回刷新后的 AI 建议卡片 response dict。"""
+    items = db.get_pending_commands(chat_id)
+    return {"type": "raw", "data": feishu.build_ai_suggestions_card(items, chat_id)}
+
+
+def _card_suggestion_save_one(value: dict, chat_id: str) -> dict:
     index = int(value.get("index", -1))
-    saved_count = int(value.get("saved_count", 0))
-    saved, remaining = db.pop_pending_command(chat_id, index)
-    if saved:
-        _execute_confirmed_command(saved)
-        saved_count += 1
-        if remaining:
-            return feishu.card_command_one_saved_response(saved, remaining, chat_id, saved_count)
-        return feishu.card_command_saved_response(saved_count)
-    return feishu.card_command_skipped_response()
+    items = db.get_pending_commands(chat_id)
+    if index < 0 or index >= len(items):
+        return feishu.card_skipped_response()
+    item = items[index]
+    if item.get("status") in ("saved", "skipped"):
+        return {"toast": {"type": "info", "content": "已处理"},
+                "card": _card_suggestions_update(chat_id)}
+    _save_suggestion_item(item)
+    item["status"] = "saved"
+    items[index] = item
+    db.save_pending_commands(chat_id, items)
+    return {
+        "toast": {"type": "success", "content": f"已保存：{item.get('title', '')[:20]}"},
+        "card": {"type": "raw", "data": feishu.build_ai_suggestions_card(items, chat_id)},
+    }
 
 
-def _card_command_all(value: dict, chat_id: str) -> dict:
-    prev_saved = int(value.get("saved_count", 0))
-    pending = db.get_pending_commands(chat_id)
-    if pending:
-        for item in pending:
-            _execute_confirmed_command(item)
-        db.clear_pending_commands(chat_id)
-        return feishu.card_command_saved_response(prev_saved + len(pending))
-    db.clear_pending_commands(chat_id)
-    return feishu.card_command_skipped_response()
+def _card_suggestion_skip_one(value: dict, chat_id: str) -> dict:
+    index = int(value.get("index", -1))
+    items = db.get_pending_commands(chat_id)
+    if index < 0 or index >= len(items):
+        return feishu.card_skipped_response()
+    item = items[index]
+    if item.get("status") in ("saved", "skipped"):
+        return {"toast": {"type": "info", "content": "已处理"},
+                "card": _card_suggestions_update(chat_id)}
+    item["status"] = "skipped"
+    items[index] = item
+    db.save_pending_commands(chat_id, items)
+    return {
+        "toast": {"type": "info", "content": f"已跳过：{item.get('title', '')[:20]}"},
+        "card": {"type": "raw", "data": feishu.build_ai_suggestions_card(items, chat_id)},
+    }
 
 
-async def _send_command_candidates_card(chat_id: str, reply: str,
-                                        sender_open_id: str,
-                                        project: str | None):
-    commands = _extract_command_candidates(reply, sender_open_id, project)
-    if not commands:
-        return
-    db.save_pending_commands(chat_id, commands)
-    await feishu.send_command_confirm_card(chat_id, commands, FEISHU_APP_ID, FEISHU_APP_SECRET)
-    log.info("sent %d command candidates to chat_id=%s", len(commands), chat_id)
+def _card_suggestion_save_all(value: dict, chat_id: str) -> dict:
+    items = db.get_pending_commands(chat_id)
+    n_saved = 0
+    for i, item in enumerate(items):
+        if item.get("status") not in ("saved", "skipped"):
+            _save_suggestion_item(item)
+            item["status"] = "saved"
+            items[i] = item
+            n_saved += 1
+    db.save_pending_commands(chat_id, items)
+    return {
+        "toast": {"type": "success", "content": f"已全部保存（{n_saved} 项）"},
+        "card": {"type": "raw", "data": feishu.build_ai_suggestions_card(items, chat_id)},
+    }
+
+
+def _card_suggestion_skip_all(value: dict, chat_id: str) -> dict:
+    items = db.get_pending_commands(chat_id)
+    n_skipped = 0
+    for i, item in enumerate(items):
+        if item.get("status") not in ("saved", "skipped"):
+            item["status"] = "skipped"
+            items[i] = item
+            n_skipped += 1
+    db.save_pending_commands(chat_id, items)
+    return {
+        "toast": {"type": "info", "content": f"已全部跳过（{n_skipped} 项）"},
+        "card": {"type": "raw", "data": feishu.build_ai_suggestions_card(items, chat_id)},
+    }
+
+
+async def _send_ai_suggestions_card(chat_id: str, suggestions: list[dict]):
+    """发送 AI 建议确认卡片（使用 pending_commands 存储）。"""
+    db.save_pending_commands(chat_id, suggestions)
+    card = feishu.build_ai_suggestions_card(suggestions, chat_id)
+    await feishu.send_reply(chat_id, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    log.info("sent %d AI suggestions to chat_id=%s", len(suggestions), chat_id)
 
 
 async def _handle_card_trigger(event: dict) -> dict:
@@ -790,15 +1159,6 @@ async def _handle_card_trigger(event: dict) -> dict:
             log.info("rejected user %s name=%s", open_id, name)
             return feishu.card_rejected_response(name)
 
-        # ── 待办确认卡片 ──
-        if action == "save_todo_one":
-            return await _card_save_todo_one(value, chat_id)
-        if action == "save_todo_all":
-            return _card_save_todo_all(value, chat_id)
-        if action == "skip_todos":
-            db.clear_pending_todos(chat_id)
-            return feishu.card_todo_skipped_response()
-
         # ── 合并确认卡片 ──
         if action == "merge_one":
             return _card_merge_one(value, chat_id)
@@ -816,15 +1176,6 @@ async def _handle_card_trigger(event: dict) -> dict:
         if action == "skip_review_actions":
             db.clear_pending_actions(chat_id)
             return feishu.card_action_skipped_response()
-
-        # ── AI 澄清问题选项点击 ──
-        if action == "command_one":
-            return _card_command_one(value, chat_id)
-        if action == "command_all":
-            return _card_command_all(value, chat_id)
-        if action == "skip_commands":
-            db.clear_pending_commands(chat_id)
-            return feishu.card_command_skipped_response()
 
         if action == "clarify_option":
             option_text  = value.get("text", "")
@@ -869,30 +1220,40 @@ async def _handle_card_trigger(event: dict) -> dict:
             return {"toast": {"type": "info", "content": f"已加载 #T{tid} 详情"},
                     "card": {"type": "raw", "data": detail}}
 
-        # ── 知识库确认卡片 ──
-        if action == "save_one":
-            index = int(value.get("index", -1))
-            saved_count = int(value.get("saved_count", 0))
-            saved, remaining = db.pop_pending_item(chat_id, index)
-            if saved:
-                _save_fact_item(saved)
-                saved_count += 1
-                log.info("saved item index=%d remaining=%d total_saved=%d", index, len(remaining), saved_count)
-                if remaining:
-                    return feishu.card_one_saved_response(saved, remaining, chat_id, saved_count)
-                return feishu.card_saved_response(saved_count)
-            return feishu.card_skipped_response()
+        if action == "view_fact_detail":
+            fid = int(value.get("id", 0))
+            fact = db.get_fact(fid)
+            if not fact:
+                return {"toast": {"type": "error", "content": "找不到该条目"},
+                        "card": {"type": "raw", "data": feishu.build_md_card("找不到该条目")}}
+            detail = feishu.build_fact_show_card(dict(fact))
+            return {"toast": {"type": "info", "content": f"已加载 #{fid} 详情"},
+                    "card": {"type": "raw", "data": detail}}
 
-        pending = db.get_pending(chat_id)
-        if action == "save_all" and pending:
-            prev_saved = int(value.get("saved_count", 0))
-            for item in pending:
-                _save_fact_item(item)
-            db.clear_pending(chat_id)
-            total = prev_saved + len(pending)
-            log.info("saved_all: prev=%d new=%d total=%d", prev_saved, len(pending), total)
-            return feishu.card_saved_response(total)
-        db.clear_pending(chat_id)
+        # ── AI 建议确认卡片 ──
+        if action == "suggestion_save_one":
+            return _card_suggestion_save_one(value, chat_id)
+        if action == "suggestion_skip_one":
+            return _card_suggestion_skip_one(value, chat_id)
+        if action == "suggestion_save_all":
+            return _card_suggestion_save_all(value, chat_id)
+        if action == "suggestion_skip_all":
+            return _card_suggestion_skip_all(value, chat_id)
+        if action == "suggestion_view_detail":
+            index = int(value.get("index", -1))
+            items = db.get_pending_commands(chat_id)
+            if index < 0 or index >= len(items):
+                return feishu.card_skipped_response()
+            return {
+                "toast": {"type": "info", "content": "已打开详情"},
+                "card": {"type": "raw", "data": feishu.build_suggestion_detail_card(items[index], chat_id, index)},
+            }
+        if action == "suggestion_back_to_list":
+            return {
+                "toast": {"type": "info", "content": "已返回建议清单"},
+                "card": _card_suggestions_update(chat_id),
+            }
+
         return feishu.card_skipped_response()
     except Exception:
         log.exception("handle_card_trigger error")
@@ -1100,11 +1461,12 @@ async def _handle_text_confirmation(chat_id: str, text: str) -> bool:
         db.clear_pending_todos(chat_id)
         saved_parts.append(f"待办 {len(todo_items)} 条")
 
-    for item in command_items:
-        _execute_confirmed_command(item)
-    if command_items:
+    saved_suggestions = [i for i in command_items if i.get("status") not in ("saved", "skipped")]
+    for item in saved_suggestions:
+        _save_suggestion_item(item)
+    if saved_suggestions:
         db.clear_pending_commands(chat_id)
-        saved_parts.append(f"更新命令 {len(command_items)} 项")
+        saved_parts.append(f"AI 建议 {len(saved_suggestions)} 项")
 
     for item in merge_items:
         _apply_merge_item(item)
@@ -1340,9 +1702,12 @@ async def _handle_message(event: dict):
         reply = "AI 响应出错，请稍后重试。"
         log.exception("AI chat error chat_id=%s", chat_id)
 
-    # 检查 AI 是否附带了澄清问题
+    # 检查 AI 是否附带了澄清问题和建议
     clarify_data = _extract_clarify(reply)
     clean_reply  = _strip_clarify(reply)
+    suggestions  = _extract_suggestions(clean_reply)
+    clean_reply  = _strip_suggestions(clean_reply)
+    clean_reply  = _sanitize_ai_execution_claims(clean_reply)
 
     db.add_message(chat_id, "assistant", clean_reply)
 
@@ -1356,8 +1721,11 @@ async def _handle_message(event: dict):
     else:
         await feishu.send_reply(chat_id, reply_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
 
-    if user_role in ("pm", "super_admin"):
-        await _send_command_candidates_card(chat_id, clean_reply, sender_open_id, project)
+    # 发送 AI 建议确认卡片（PM / 管理员）
+    if suggestions and user_role in ("pm", "super_admin"):
+        enriched = _enrich_suggestions(suggestions, project)
+        if enriched:
+            await _send_ai_suggestions_card(chat_id, enriched)
 
     # 如果 AI 附带了澄清问题，额外发送问题卡片并记录待处理状态
     if clarify_data and user_role in ("pm", "super_admin"):
@@ -1370,11 +1738,6 @@ async def _handle_message(event: dict):
             )
             await feishu.send_reply(chat_id, clarify_card, FEISHU_APP_ID, FEISHU_APP_SECRET)
             log.info("clarify card sent chat_id=%s question=%r", chat_id, question[:60])
-
-    # 仅 PM 和管理员触发信息提取卡片 + 待办意图提取
-    if user_role in ("pm", "super_admin"):
-        asyncio.create_task(_extract_and_card(chat_id, text, project))
-        asyncio.create_task(_extract_todos_and_card(chat_id, text, project))
 
 
 def _register_text() -> str:
@@ -1491,6 +1854,7 @@ async def _clarify_and_respond(chat_id: str, sender_oid: str, user: dict,
             timeout=60.0,
         )
         reply = _strip_clarify(reply)
+        reply = _sanitize_ai_execution_claims(reply)
         db.add_message(chat_id, "assistant", reply)
         await feishu.send_reply(chat_id, feishu.build_md_card(reply), FEISHU_APP_ID, FEISHU_APP_SECRET)
     except Exception:
@@ -1498,6 +1862,7 @@ async def _clarify_and_respond(chat_id: str, sender_oid: str, user: dict,
 
 
 async def _extract_and_card(chat_id: str, text: str, project: str = "默认"):
+    return  # Replaced by ===SUGGESTIONS=== flow in AI response
     try:
         items = await claude_client.extract_facts(text)
         if not items:
@@ -1515,13 +1880,40 @@ async def _extract_and_card(chat_id: str, text: str, project: str = "默认"):
                 })
             else:
                 enriched.append({**item, "action": "new", "project": project})
-        db.save_pending(chat_id, enriched)
-        await feishu.send_confirm_card(chat_id, enriched, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        existing = db.get_pending_commands(chat_id)
+        fact_suggestions = []
+        for item in enriched[:10]:
+            title = "更新知识库条目" if item.get("action") == "update" else "新增知识库条目"
+            desc = (f"目标：#{item.get('fact_id')}《{item.get('fact_title','')}》"
+                    if item.get("action") == "update"
+                    else f"类型：{item.get('type','knowledge')}")
+            fact_suggestions.append({
+                "suggestion_kind": "fact",
+                "title": title,
+                "description": desc,
+                "command_type": "fact",
+                "status": "pending",
+                "fact_item": item,
+            })
+        merged = existing + fact_suggestions
+        db.save_pending_commands(chat_id, merged)
+        # Avoid duplicate cards: if command suggestions already produced a card in this turn,
+        # only merge data into pending list and do not send a second card here.
+        if existing:
+            return
+        sent = await feishu.send_command_confirm_card(chat_id, merged, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        if not sent:
+            await feishu.send_reply(
+                chat_id,
+                "检测到可保存的知识条目，但确认卡片发送失败。请回复“保存”直接入库，或稍后重试。",
+                FEISHU_APP_ID, FEISHU_APP_SECRET,
+            )
     except Exception:
         log.exception("extract_and_card error")
 
 
 async def _extract_todos_and_card(chat_id: str, text: str, project: str = "默认"):
+    return  # Replaced by ===SUGGESTIONS=== flow in AI response
     try:
         todos = await claude_client.extract_todo_intent(text)
         if not todos:
@@ -1529,7 +1921,13 @@ async def _extract_todos_and_card(chat_id: str, text: str, project: str = "默�
         for t in todos:
             t["project"] = project
         db.save_pending_todos(chat_id, todos)
-        await feishu.send_todo_confirm_card(chat_id, todos, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        sent = await feishu.send_todo_confirm_card(chat_id, todos, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        if not sent:
+            await feishu.send_reply(
+                chat_id,
+                "检测到待办建议，但确认卡片发送失败。请回复“保存”直接入库，或稍后重试。",
+                FEISHU_APP_ID, FEISHU_APP_SECRET,
+            )
     except Exception:
         log.exception("extract_todos_and_card error")
 
@@ -1679,8 +2077,11 @@ async def _handle_admin_fact_decompose(text: str, chat_id: str = "") -> str:
         t["source_fact_id"] = fact_id
         t["project"] = project
     if chat_id:
-        db.save_pending_todos(chat_id, todos)
-        await feishu.send_todo_confirm_card(chat_id, todos, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        suggestion_items = [
+            {"kind": "new_todo", "status": "pending", "project": project, **t}
+            for t in todos
+        ]
+        await _send_ai_suggestions_card(chat_id, suggestion_items)
         return f"已为 #{fact_id}《{fact['title'][:20]}》生成 {len(todos)} 条待办建议，请在卡片中确认。"
     # 无 chat_id 时直接入库（兜底，正常不会走到这里）
     saved: list[tuple[int, str]] = []
@@ -1699,6 +2100,21 @@ async def _handle_admin_fact_decompose(text: str, chat_id: str = "") -> str:
     for tid, title in saved:
         lines.append(f"  #T{tid} {title}")
     return "\n".join(lines)
+
+
+def _strip_action_command_lines(text: str) -> str:
+    """Hide raw action commands from AI visible reply; keep them for card extraction only."""
+    kept: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        normalized = re.sub(r"^[-*\d\.\)\s]+", "", s)
+        if normalized.startswith("[AUTO]"):
+            normalized = normalized[len("[AUTO]"):].strip()
+        if normalized.startswith(("/todo", "/risk", "/admin")):
+            continue
+        kept.append(line)
+    out = "\n".join(kept).strip()
+    return out or "我已整理出待处理建议，请在确认卡片中逐条处理。"
 
 
 async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:

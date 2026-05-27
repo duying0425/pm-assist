@@ -374,6 +374,8 @@ key / value / updated_at
 48. **飞书卡片全面升级 schema 2.0**：所有卡片 builder 添加 `"schema":"2.0"` 并将 `elements` 包进 `body`；AI 回复/文本展示改用 `{"tag":"markdown"}` 元素，支持完整 Markdown（`##` 标题、`|表格|`、代码块）；column 内部保留 `lark_md` 文本；系统提示同步解除 `##` 和表格禁令（v0.8.1）
 49. **"思考中"卡片原地更新修复**：卡片更新改用正确端点 `PATCH /im/v1/messages/{id}`（原 `/body` 子路径仅支持 text/post，不支持 interactive）；schema 2.0 更新时注入 `update_multi: True`；"思考中"占位卡片可被 AI 回复卡片原地替换（v0.8.1）
 50. **管理员项目绑定与全量 AI 上下文**：`/join [项目名]` 对管理员直接生效（无需审批）；管理员无项目绑定时 `_resolve_project` 返回 `None`，`get_full_context(None)` 查全量（所有项目的 facts/todos 均注入，带项目标注）；`_sender_info` 显示管理员当前关注项目；AI 上下文新增"系统注册用户"章节（`db.get_users_summary()`），AI 可回答"谁在哪个项目、什么角色"（v0.8.2）
+51. **AI 建议整合到主回复**：取消独立 `extract_facts` / `extract_todo_intent` 额外 AI 调用；AI 在主回复末尾内嵌 `===SUGGESTIONS=== JSON ===END_SUGGESTIONS===` 块，主流程解析后弹出统一建议确认卡片（v0.9.0）
+52. **统一 AI 建议确认卡片**：`build_ai_suggestions_card` 按类型分组（风险/里程碑/知识/待办/更新建议），每项附"详情"按钮；`build_suggestion_detail_card` 展示完整信息 + 保存/跳过/返回操作；支持全部保存、全部跳过、全部处理完时显示汇总；`/admin fact decompose` 生成的待办也改走此卡片（v0.9.0）
 
 ## 命令速查
 
@@ -726,7 +728,10 @@ _ACTION_LABELS = {("risk","close"):"关闭风险", ("fact","archive"):"归档信
 - v0.8.0 已部署（按项目早报卡片+PM推送、风险/待办列表可点击详情、AI标题加粗渲染修复、AI澄清问题卡片）
 - v0.8.1 已部署（飞书卡片全面升级 schema 2.0；"思考中"卡片原地更新修复：PATCH 端点从 /body 改为正确的 /messages/{id}，注入 update_multi:true）
 - v0.8.2 已部署（管理员 /join 直接绑定项目；无绑定时查全量跨项目上下文；AI 注入用户列表；sender_info 显示管理员项目）
-- v0.8.3 本地就绪待部署（保留待确认状态；文字“保存/确认/跳过”可消费 pending；AI 建议命令转确认按钮后再写库）
+- v0.8.3 已部署（保留待确认状态；文字“保存/确认/跳过”可消费 pending；AI 建议命令转确认按钮后再写库）
+- v0.8.4 已部署（补全 AI 命令集含 risk owner/close/reopen；修复卡片发送失败静默问题，新增 400 响应日志与失败兜底提示）
+- v0.8.5 已部署（新增 AI 执行口吻防误导：无命令时禁止”已确认/已更新/已保存/已执行”语气，统一提示”仅建议未落库”）
+- v0.9.0 本地就绪待部署（AI 建议整合到主回复：取消单独 extract_facts/extract_todo_intent 调用，AI 在回复中内嵌 ===SUGGESTIONS=== 块；统一建议确认卡片 build_ai_suggestions_card，支持分组/详情/按条保存跳过/全部保存跳过；旧 command_*/save_one/save_all/todo 卡片全部清理）
 - **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）

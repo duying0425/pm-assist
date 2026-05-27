@@ -25,15 +25,27 @@ _ROLE = """你是东软睿驰自动驾驶团队的内部PM助手，专门帮助P
 回答格式：可以用**加粗**、## ### 标题、数字序号或短横线列表、| 表格 |（飞书卡片均支持渲染）；不要用*斜体*、`代码块`等格式。
 
 重要约束：
-- 当用户提供事实类信息（人员分工、里程碑节点、风险、决策等），不要说"已记录"、"已保存"、"我会记住"等暗示已持久化的话，系统会自动提示用户确认是否保存到知识库
-- 信息提取和保存由系统后台处理，你的职责是理解并给出建议，不是替代存储动作
-- 当你建议新增或更新数据时，可把建议命令单独成行给出，系统会自动转成确认按钮；不要说已经执行。可用格式：
-  /todo [待办内容] [risk|plan ID可选]
-  /todo update [ID] [title|body|priority|owner|due_date] [值]
-  /todo done|cancel [ID]
-  /risk add [risk|issue|blocker|dependency] [high|medium|low] [标题] | [描述]
-  管理员可用：/admin fact add [type] [标题] | [正文]、/admin fact update [ID] [status|owner|priority|due_date|title|body] [值]、/admin fact archive [ID]
-- 命令必须单独一行；普通用户确认按钮点击后才会写库。
+- 当用户提供事实类信息（人员分工、里程碑节点、风险、决策等），不要说"已记录"、"已保存"、"我会记住"等暗示已持久化的话，系统会提示用户通过确认卡片决定是否保存
+- 当用户消息涉及需要记录的项目信息时，在回答正文结束后附加结构化建议块（建议块在澄清问题之前）：
+===SUGGESTIONS===
+{"items":[
+  {"kind":"new_fact","type":"risk","title":"...","body":"...","priority":"medium","owner":"","due_date":""},
+  {"kind":"new_fact","type":"milestone","title":"...","body":"...","owner":"","due_date":"2026-06-30"},
+  {"kind":"new_todo","title":"...","body":"...","priority":"medium","owner":"","due_date":""},
+  {"kind":"update_fact","id":12,"field":"owner","value":"张三","reason":"用户明确了负责人"},
+  {"kind":"update_fact","id":15,"field":"status","value":"resolved","reason":"用户说明风险已解决"},
+  {"kind":"update_todo","id":5,"field":"status","value":"done","reason":"用户说明已完成"}
+]}
+===END_SUGGESTIONS===
+  约束：
+  - kind 只能是：new_fact | new_todo | update_fact | update_todo
+  - new_fact 的 type：risk | issue | blocker | dependency | milestone | decision | knowledge | team | client
+  - update 的 field 只能是：owner | priority | due_date | status
+  - status 合法值：resolved（已关闭/完成）| active（进行中）| archived（归档）
+  - priority 合法值：high | medium | low
+  - 只在用户消息真正包含值得记录的新信息时给出建议；不要重复现有知识库已有内容；不要凭空捏造
+  - 若无需记录任何内容，则不输出 ===SUGGESTIONS=== 块
+- 在任何情况下，不要声称"已更新/已保存/已执行"；只能说"建议已生成，请在确认卡片中操作"。
 
 澄清问题（谨慎使用）：
 - 仅当缺少某个关键信息会导致建议严重偏差时，才在回答末尾附加澄清问题
@@ -121,34 +133,6 @@ async def chat(history: list[dict], context: dict,
     return response.choices[0].message.content
 
 
-_EXTRACT_PROMPT = """你是一个信息提取助手。分析下面这段项目相关的消息，提取值得存入知识库的关键信息。
-
-只提取以下类型（忽略闲聊、问候、无实质内容的话）：
-- risk: 风险或问题（影响项目进度/质量的事项）
-- milestone: 里程碑、时间节点、计划安排
-- decision: 重要决定或达成的结论
-- team: 人员分工、联系人、职责
-- client: 客户相关信息（需求、态度、要求）
-
-拆分规则（重要）：
-- 每个独立事项必须单独一条，发现几个就输出几条，绝不合并
-- 同一条消息中的多个风险、多个里程碑节点、多个人员各自独立
-- 每条 content 只描述一件事，不超过60字
-
-示例：
-消息："张工说BSP SDK还没验证好，测试环境也没搭，预计5月底完成集成测试"
-输出：{"has_facts": true, "items": [
-  {"type": "risk", "content": "BSP SDK验证未完成，可能影响后续进度"},
-  {"type": "risk", "content": "测试环境尚未搭建"},
-  {"type": "milestone", "content": "集成测试预计5月底完成"}
-]}
-
-返回格式（仅返回JSON，不要其他内容）：
-无内容时：{"has_facts": false}
-有内容时：{"has_facts": true, "items": [{"type": "risk", "content": "..."}]}
-
-用户消息：
-"""
 
 
 _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析以下项目信息库的所有 active facts，目标不是简单挑错，而是从杂乱信息中提炼仍然有用的项目数据。
@@ -173,7 +157,7 @@ _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析
 - 如果存在合并建议，必须同时在报告末尾的机器可读区写入 merge_candidates。
 
 三、当前状态更新建议
-- 找出应被更新为“当前状态”的条目，说明建议补充什么。
+- 找出应被更新为"当前状态"的条目，说明建议补充什么。
 - 可以给人工确认命令，但不要加 [AUTO]，例如：
 /admin fact update 12 body 新的状态描述
 
@@ -191,7 +175,7 @@ _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析
 
 六、描述质量改写建议
 - 找出描述太口语、缺背景、缺结论、缺下一步的信息。
-- 给出“建议改写正文”，但不要加 [AUTO]，不要自动覆盖。
+- 给出"建议改写正文"，但不要加 [AUTO]，不要自动覆盖。
 
 七、低风险字段补全
 - 只针对 owner、priority、due_date、status 这类结构化字段。
@@ -261,23 +245,6 @@ async def nightly_review(facts_text: str) -> str:
         return f"AI洗盘分析失败：{e}"
 
 
-async def extract_facts(text: str) -> list[dict]:
-    try:
-        response = await _client.chat.completions.create(
-            model=AI_MODEL,
-            max_tokens=1500,
-            messages=[{"role": "user", "content": _EXTRACT_PROMPT + text}],
-        )
-        import json
-        raw = response.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1].lstrip("json").strip()
-        result = json.loads(raw)
-        if result.get("has_facts"):
-            return result.get("items", [])
-    except Exception:
-        pass
-    return []
 
 
 _DECOMPOSE_PROMPT = """你是项目管理专家。将以下风险/问题分解为2-6条具体可执行的待办事项。
@@ -320,44 +287,3 @@ async def decompose_risk(fact: dict) -> list[dict]:
         return []
 
 
-_TODO_INTENT_PROMPT_TPL = """分析以下用户消息，判断是否有明确的"创建待办事项"意图。
-
-只在用户明确要求建立/创建/新增待办、任务、提醒时提取，询问或讨论性质的消息不要提取。
-
-提取字段：
-- title: 待办标题（动词开头，简洁）
-- due_date: 截止日期（YYYY-MM-DD格式），没有则留空字符串
-- priority: high/medium/low，默认medium
-- owner: 负责人姓名，没明确提到则留空
-
-今天是 {today}，遇到"下周X"、"明天"、"本周五"等相对日期请换算为绝对日期。
-
-返回格式（仅JSON，不要其他内容）：
-无意图：{{"has_todos": false}}
-有意图：{{"has_todos": true, "todos": [{{"title": "...", "due_date": "", "priority": "medium", "owner": ""}}]}}
-
-用户消息：
-"""
-
-
-async def extract_todo_intent(text: str) -> list[dict]:
-    """从用户消息中提取明确的待办创建意图，无意图则返回空列表。"""
-    import json
-    from datetime import datetime
-    today = datetime.now().strftime("%Y-%m-%d")
-    prompt = _TODO_INTENT_PROMPT_TPL.format(today=today) + text
-    try:
-        response = await _client.chat.completions.create(
-            model=AI_MODEL,
-            max_tokens=800,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1].lstrip("json").strip()
-        result = json.loads(raw)
-        if result.get("has_todos"):
-            return result.get("todos", [])
-    except Exception:
-        pass
-    return []
