@@ -1191,3 +1191,116 @@ def build_morning_report_card(project_name: str, risks: list,
 
     header_title = f"📋 {today} {project_name}早报" if project_name else f"📋 {today} 综合早报"
     return _card(elements, header=_header(header_title, "blue"), forward=False)
+
+
+# ── 人员信息卡片 ──────────────────────────────────────────────
+
+def build_user_info_card(user: dict,
+                         members: list | None = None,
+                         all_users: list | None = None) -> dict:
+    """人员信息卡片，按角色展示不同内容。
+    - all_users 不为 None → 管理员总览（分类）
+    - members 不为 None   → PM 视图（自己 + 项目成员）
+    - 否则                → 普通成员视图（仅自己）
+    """
+    _ROLE_ZH = {"super_admin": "管理员", "pm": "项目经理", "member": "普通成员"}
+    _STATUS_ICON = {"active": "✓", "pending": "⏳", "rejected": "✗", "inactive": "—"}
+
+    role = user.get("role", "member")
+    name = user.get("name") or "(未知)"
+    project = user.get("project") or "—"
+    role_zh = _ROLE_ZH.get(role, role)
+    joined = (user.get("created_at") or "")[:10]
+
+    # ── 管理员总览 ────────────────────────────────────────────
+    if all_users is not None:
+        active_admins  = [u for u in all_users if u["role"] == "super_admin" and u["status"] == "active"]
+        active_pms     = [u for u in all_users if u["role"] == "pm"          and u["status"] == "active"]
+        active_members = [u for u in all_users if u["role"] == "member"      and u["status"] == "active"]
+        pending_users  = [u for u in all_users if u["status"] == "pending"]
+        inactive_users = [u for u in all_users if u["status"] in ("rejected", "inactive")]
+
+        total_active = len(active_admins) + len(active_pms) + len(active_members)
+        lines = [f"## 用户总览（在籍 {total_active} 人）\n"]
+
+        if active_admins:
+            lines.append(f"**管理员（{len(active_admins)} 人）**")
+            for u in active_admins:
+                proj_tag = f"（{u['project']}）" if u.get("project") else ""
+                lines.append(f"- {u['name'] or '(未知)'}{proj_tag}")
+            lines.append("")
+
+        if active_pms:
+            # 按项目分组
+            pm_by_proj: dict[str, list] = {}
+            for u in active_pms:
+                k = u.get("project") or "—"
+                pm_by_proj.setdefault(k, []).append(u)
+            lines.append(f"**项目经理（{len(active_pms)} 人）**")
+            for proj_name in sorted(pm_by_proj):
+                names = "、".join(u["name"] or "(未知)" for u in pm_by_proj[proj_name])
+                lines.append(f"- {proj_name}：{names}")
+            lines.append("")
+
+        if active_members:
+            # 按项目分组
+            mem_by_proj: dict[str, list] = {}
+            for u in active_members:
+                k = u.get("project") or "—"
+                mem_by_proj.setdefault(k, []).append(u)
+            lines.append(f"**普通成员（{len(active_members)} 人）**")
+            for proj_name in sorted(mem_by_proj):
+                names = "、".join(u["name"] or "(未知)" for u in mem_by_proj[proj_name])
+                lines.append(f"- {proj_name}：{names}")
+            lines.append("")
+
+        if pending_users:
+            lines.append(f"**待审批（{len(pending_users)} 人）**")
+            for u in pending_users:
+                req_role = _ROLE_ZH.get(u["role"], u["role"])
+                proj_tag = f"/{u['project']}" if u.get("project") else ""
+                lines.append(f"- ⏳ {u['name'] or '(未知)'}　申请：{req_role}{proj_tag}")
+            lines.append("")
+
+        if inactive_users:
+            lines.append(f"**已停用/拒绝（{len(inactive_users)} 人）**")
+            for u in inactive_users:
+                icon = _STATUS_ICON.get(u["status"], u["status"])
+                lines.append(f"- {icon} {u['name'] or '(未知)'}")
+
+        return build_md_card("\n".join(lines), title="用户总览", color="purple")
+
+    # ── PM 视图 ───────────────────────────────────────────────
+    if members is not None:
+        lines = [
+            "## 我的信息",
+            f"**姓名：** {name}　**角色：** {role_zh}　**项目：** {project}　**加入：** {joined}",
+            "",
+            f"## {project} · 项目成员",
+        ]
+        if not members:
+            lines.append("（暂无其他成员）")
+        else:
+            adm  = [u for u in members if u["role"] == "super_admin" and u["status"] == "active"]
+            pms  = [u for u in members if u["role"] == "pm"          and u["status"] == "active"]
+            mems = [u for u in members if u["role"] == "member"      and u["status"] == "active"]
+            pend = [u for u in members if u["status"] == "pending"]
+            if adm:
+                lines.append("**管理员：** " + "、".join(u["name"] or "(未知)" for u in adm))
+            if pms:
+                lines.append("**项目经理：** " + "、".join(u["name"] or "(未知)" for u in pms))
+            if mems:
+                lines.append("**成员：** " + "、".join(u["name"] or "(未知)" for u in mems))
+            if pend:
+                lines.append("**待审批：** " + "、".join(f"⏳{u['name'] or '(未知)'}" for u in pend))
+        return build_md_card("\n".join(lines), title=f"{project} 项目", color="green")
+
+    # ── 普通成员视图 ──────────────────────────────────────────
+    lines = [
+        "## 我的信息",
+        f"**姓名：** {name}",
+        f"**角色：** {role_zh}",
+        f"**项目：** {project}",
+        f"**加入：** {joined}",
+    ]
+    return build_md_card("\n".join(lines), title="个人信息", color="blue")

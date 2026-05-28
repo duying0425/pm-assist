@@ -1429,13 +1429,29 @@ async def _handle_bot_menu(event: dict):
             await send(result)
             return
 
+        # 人员信息查询：member/pm/super_admin 均可，按角色展示不同内容
+        if event_key == "admin_users":
+            my_user = db.get_user(open_id)
+            if user_role == "super_admin":
+                all_users = [dict(u) for u in db.list_users()]
+                card = feishu.build_user_info_card(my_user or {}, all_users=all_users)
+            elif user_role == "pm":
+                my_project = (my_user or {}).get("project", "")
+                if my_project:
+                    members = [dict(u) for u in db.list_users()
+                               if u.get("project") == my_project and u.get("open_id") != open_id]
+                else:
+                    members = []
+                card = feishu.build_user_info_card(my_user or {}, members=members)
+            else:
+                card = feishu.build_user_info_card(my_user or {})
+            await send(card)
+            return
+
         # 管理员专用
         if user_role != "super_admin":
             await send("无权限：此操作仅限管理员使用。")
             return
-
-        if event_key == "admin_users":
-            await send(_handle_admin("/admin user list", open_id, project, chat_id))
 
     except Exception:
         log.exception("_handle_bot_menu error event_key=%s", event.get("event_key", ""))

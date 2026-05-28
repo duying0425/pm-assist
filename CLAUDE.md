@@ -385,7 +385,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 | `view_risks` | 查看风险 | pm+ |
 | `run_review` | AI 洗盘 | pm+ |
 | `view_morning_report` | 查看早报 | pm+ |
-| `admin_users` | 用户列表 | super_admin |
+| `admin_users` | 人员信息 | member+ |
 
 > 快捷菜单事件无 chat_id，`view_*` 使用发起人 open_id 作为 chat_id，项目按用户绑定解析（super_admin 无绑定时查全量）。
 
