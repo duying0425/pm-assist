@@ -28,6 +28,8 @@ from config import (
 
 _ROLE_ZH = {"super_admin": "管理员", "pm": "项目经理PM", "member": "项目成员", "pending": "待审批"}
 
+BOT_OPEN_ID: str = ""
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -502,8 +504,11 @@ async def _backup_db():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global BOT_OPEN_ID
     db.init_db()
     log.info("DB initialized")
+    BOT_OPEN_ID = await feishu.get_bot_open_id(FEISHU_APP_ID, FEISHU_APP_SECRET)
+    log.info("Bot open_id fetched: %s", BOT_OPEN_ID)
     _scheduler.add_job(_morning_review_and_report, "cron", hour=9, minute=0, id="morning_report")
     _scheduler.add_job(_backup_db, "cron", hour=3, minute=0, id="db_backup")
     _scheduler.start()
@@ -1689,7 +1694,12 @@ async def _handle_message(event: dict):
 
     # 群聊中只响应 @Bot 的消息
     if chat_type == "group":
-        bot_mentioned = any(m.get("is_bot", False) for m in message.get("mentions", []))
+        mention_open_ids = {m.get("id", {}).get("open_id", "") for m in message.get("mentions", [])}
+        if BOT_OPEN_ID:
+            bot_mentioned = BOT_OPEN_ID in mention_open_ids
+        else:
+            # BOT_OPEN_ID 未拉到时降级：有任何 mention 即响应（飞书默认只推 @Bot 消息）
+            bot_mentioned = bool(mention_open_ids)
         if not bot_mentioned:
             return
 

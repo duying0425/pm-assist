@@ -451,9 +451,10 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - 飞书更新卡片消息：必须用 `PATCH /im/v1/messages/{id}`（不带 `/body`），`/body` 子路径只支持 text/post，不支持 interactive；schema 2.0 卡片更新时 config 中须加 `"update_multi": true`
 - **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - AI 洗盘 `direct` 模式自动执行，请先用 `/review run report` 观察建议质量再切换；`report_only` 为默认推荐模式
+- 飞书 `mentions` 字段中**没有 `is_bot` 属性**；判断 Bot 是否被 @需对比 Bot 自身 open_id（启动时由 `/bot/v3/info` 拉取，存于全局 `BOT_OPEN_ID`）
 
 ## 服务器当前状态
-- **当前版本：v1.0.0（已部署）**
+- **当前版本：v1.0.1（已部署）**
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - `init_db()` 自动创建所有表、索引、幂等执行种子数据，**无需手动迁移**（seed.py / seed_yadi.py / migrate_v2.py 均已内化删除）
 - 首次启动：自动创建 users/projects 表并种入「雅迪」项目；ADMIN_OPEN_IDS 用户首次发消息时自动注册为 super_admin

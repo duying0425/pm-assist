@@ -98,6 +98,17 @@ async def get_tenant_token(app_id: str, app_secret: str) -> str:
     return _token_cache["value"]
 
 
+async def get_bot_open_id(app_id: str, app_secret: str) -> str:
+    token = await get_tenant_token(app_id, app_secret)
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{FEISHU_BASE}/bot/v3/info",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    data = resp.json()
+    return data.get("bot", {}).get("open_id", "")
+
+
 async def send_text_to_user(open_id: str, text: str, app_id: str, app_secret: str):
     token = await get_tenant_token(app_id, app_secret)
     async with httpx.AsyncClient() as client:
