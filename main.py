@@ -12,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-import claude_client
+import ai_client
 import db
 import feishu
 import notify as _notify
@@ -310,7 +310,7 @@ async def _build_and_save_review(mode: str | None = None) -> str | None:
         return None
 
     effective_mode = mode or _get_review_mode()
-    report = await claude_client.nightly_review(facts_text)
+    report = await ai_client.nightly_review(facts_text)
     if effective_mode == _REVIEW_MODE_DIRECT:
         results = _apply_review_commands(report)
         report = (
@@ -1805,7 +1805,7 @@ async def _handle_message(event: dict):
 
     try:
         reply = await asyncio.wait_for(
-            claude_client.chat(history, context,
+            ai_client.chat(history, context,
                                sender_info=sender_info_str, role=user_role),
             timeout=90.0,
         )
@@ -1977,7 +1977,7 @@ async def _clarify_and_respond(chat_id: str, sender_oid: str, user: dict,
         sender_info = _sender_info(user)
         role = user.get("role", "pm")
         reply = await asyncio.wait_for(
-            claude_client.chat(history, context, sender_info=sender_info, role=role),
+            ai_client.chat(history, context, sender_info=sender_info, role=role),
             timeout=90.0,
         )
         reply = _strip_clarify(reply)
@@ -1991,7 +1991,7 @@ async def _clarify_and_respond(chat_id: str, sender_oid: str, user: dict,
 async def _extract_and_card(chat_id: str, text: str, project: str = "默认"):
     return  # Replaced by ===SUGGESTIONS=== flow in AI response
     try:
-        items = await claude_client.extract_facts(text)
+        items = await ai_client.extract_facts(text)
         if not items:
             return
         enriched = []
@@ -2042,7 +2042,7 @@ async def _extract_and_card(chat_id: str, text: str, project: str = "默认"):
 async def _extract_todos_and_card(chat_id: str, text: str, project: str = "默认"):
     return  # Replaced by ===SUGGESTIONS=== flow in AI response
     try:
-        todos = await claude_client.extract_todo_intent(text)
+        todos = await ai_client.extract_todo_intent(text)
         if not todos:
             return
         for t in todos:
@@ -2195,7 +2195,7 @@ async def _handle_admin_fact_decompose(text: str, chat_id: str = "") -> str:
         return f"找不到 fact #{fact_id}"
     if fact["dimension"] != "risk":
         return f"#{fact_id} 不是风险类型（dimension={fact['dimension']}），仅支持分解 risk/issue/blocker/dependency"
-    todos = await claude_client.decompose_risk(fact)
+    todos = await ai_client.decompose_risk(fact)
     if not todos:
         return "AI 未能分解出待办事项，请检查条目内容是否足够具体"
     # 标记来源 fact，以便确认后写入时保留追溯关系
