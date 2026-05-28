@@ -860,7 +860,7 @@ def get_risks_text(project: str = "默认") -> str:
     return get_full_context(project)["risks"]
 
 
-def get_all_facts_for_review() -> str:
+def get_all_facts_for_review(project: str) -> str:
     _TYPE_ZH = {
         "risk": "风险", "issue": "问题", "blocker": "阻塞", "dependency": "依赖",
         "milestone": "里程碑", "decision": "决策", "team": "人员",
@@ -870,7 +870,9 @@ def get_all_facts_for_review() -> str:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT id, type, dimension, title, body, priority, owner, due_date, project, updated_at"
-            " FROM facts WHERE status='active' AND type != 'report' ORDER BY dimension, type, id"
+            " FROM facts WHERE status='active' AND type != 'report' AND project=?"
+            " ORDER BY dimension, type, id",
+            (project,)
         ).fetchall()
     if not rows:
         return ""
@@ -1095,23 +1097,29 @@ def clear_pending_clarify(chat_id: str):
     clear_pending(_CLARIFY_PREFIX + chat_id)
 
 
-def save_nightly_review(content: str) -> int:
+def save_nightly_review(content: str, project: str) -> int:
     today = datetime.now().strftime("%Y-%m-%d")
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO facts(type,dimension,title,body,status,project,source)"
             " VALUES(?,?,?,?,?,?,?)",
-            ("report", "system", f"AI数据洗盘 {today}", content, "active", "system", "ai"),
+            ("report", "system", f"AI数据洗盘 {today}", content, "active", project, "ai"),
         )
         return cur.lastrowid
 
 
-def get_latest_nightly_review() -> str | None:
+def get_latest_nightly_review(project: str | None = None) -> str | None:
     with get_conn() as conn:
-        row = conn.execute(
-            "SELECT body FROM facts WHERE type='report' AND project='system'"
-            " ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        if project:
+            row = conn.execute(
+                "SELECT body FROM facts WHERE type='report' AND project=?"
+                " ORDER BY id DESC LIMIT 1", (project,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT body FROM facts WHERE type='report'"
+                " ORDER BY id DESC LIMIT 1"
+            ).fetchone()
     return row["body"] if row else None
 
 

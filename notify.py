@@ -65,23 +65,25 @@ def build_morning_report(review: str | None = None) -> str:
     return "".join(parts)
 
 
-def get_morning_cards(review_text: str | None = None) -> dict[str | None, dict]:
-    """返回各项目的早报卡片 dict，key=project_name（None=全项目）。
-    全项目卡片给管理员/notify用户；各项目卡片给对应 PM 用户。
+def get_morning_cards(review_by_project: dict[str, str | None] | None = None) -> dict[str | None, dict]:
+    """返回各项目的早报卡片 dict，key=project_name（None=兜底全量卡片）。
+    review_by_project: {project_name: stripped_review_text}，每个项目使用自己的洗盘报告。
     """
     today = datetime.now().strftime("%m月%d日")
     projects = db.list_projects(active_only=True)
+    if review_by_project is None:
+        review_by_project = {}
     cards: dict[str | None, dict] = {}
 
-    # 全项目卡片（admin/notify 收件人）
+    # 兜底全量卡片（无活跃项目时使用，无洗盘文本）
     all_risks = db.list_risks(status="open")
-    cards[None] = feishu.build_morning_report_card("", all_risks, review_text, today)
+    cards[None] = feishu.build_morning_report_card("", all_risks, None, today)
 
-    # 每个项目单独卡片（供 PM 接收，也包含洗盘摘要）
+    # 每个项目单独卡片，使用该项目自己的洗盘报告
     for proj in projects:
         name = proj["name"]
         proj_risks = db.list_risks(status="open", project=name)
-        cards[name] = feishu.build_morning_report_card(name, proj_risks, review_text, today)
+        cards[name] = feishu.build_morning_report_card(name, proj_risks, review_by_project.get(name), today)
 
     return cards
 

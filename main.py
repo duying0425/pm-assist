@@ -339,10 +339,10 @@ def _strip_merge_candidates_json(report: str) -> str:
     return report.strip()
 
 
-async def _build_and_save_review(mode: str | None = None) -> str | None:
-    facts_text = db.get_all_facts_for_review()
+async def _build_and_save_review(mode: str | None = None, project: str = "") -> str | None:
+    facts_text = db.get_all_facts_for_review(project)
     if not facts_text:
-        log.info("nightly review: no active facts to review")
+        log.info("nightly review: no active facts for project=%s", project)
         return None
 
     effective_mode = mode or _get_review_mode()
@@ -354,25 +354,23 @@ async def _build_and_save_review(mode: str | None = None) -> str | None:
             f"=== 直接清洗执行结果 ===\n"
             + "\n".join(f"- {r}" for r in results)
         )
-    db.save_nightly_review(_strip_merge_candidates_json(report))
-    log.info("nightly review saved to DB mode=%s", effective_mode)
+    db.save_nightly_review(_strip_merge_candidates_json(report), project)
+    log.info("nightly review saved to DB project=%s mode=%s", project, effective_mode)
     return report
 
 
-def _review_recipients_admins_pm() -> set[str]:
-    recipients = set(ADMIN_OPEN_IDS)
-    for role in ("super_admin", "pm"):
-        for user in db.list_users(role=role, status="active"):
-            if user["open_id"]:
-                recipients.add(user["open_id"])
-    return recipients
+def _get_project_pm_ids(project: str) -> set[str]:
+    ids: set[str] = set()
+    for user in db.list_users(role="pm", status="active"):
+        if user["open_id"] and user.get("project") == project:
+            ids.add(user["open_id"])
+    return ids
 
 
-async def _send_review_to_admins_pm(report: str):
-    recipients = _review_recipients_admins_pm()
+async def _send_review_to_recipients(recipients: set[str], report: str):
     for uid in recipients:
         await feishu.send_reply_to_user(uid, report, FEISHU_APP_ID, FEISHU_APP_SECRET)
-    log.info("manual review sent to %d admins/PMs: %s", len(recipients), recipients)
+    log.info("review report sent to %d recipients", len(recipients))
 
 
 def _collect_review_suggestion_items(report: str) -> list[dict]:
@@ -420,9 +418,8 @@ async def _send_review_suggestions_card(chat_id: str, report: str):
     log.info("sent %d review suggestion items to %s", len(items), chat_id)
 
 
-async def _broadcast_review_suggestions(open_ids: set[str], report: str):
-    """向多个用户各自发送独立的洗盘建议确认卡片（每人一份 pending_commands）。"""
-    items = _collect_review_suggestion_items(report)
+async def _broadcast_suggestion_items(open_ids: set[str], items: list[dict]):
+    """向多个用户各自发送建议确认卡片（每人一份 pending_commands）。"""
     if not items:
         return
     for uid in open_ids:
@@ -431,24 +428,22 @@ async def _broadcast_review_suggestions(open_ids: set[str], report: str):
         db.save_pending_commands(uid, items)
         card = feishu.build_ai_suggestions_card(items, uid)
         await feishu.send_reply_to_user(uid, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
-    log.info("broadcast %d review suggestion items to %d users", len(items), len(open_ids))
+    log.info("broadcast %d suggestion items to %d users", len(items), len(open_ids))
+
+
+async def _broadcast_review_suggestions(open_ids: set[str], report: str):
+    items = _collect_review_suggestion_items(report)
+    await _broadcast_suggestion_items(open_ids, items)
 
 
 async def _morning_review_and_report():
-    """每天09:00：AI洗盘后，每个项目发一张卡给 admin+NOTIFY+该项目PM。
-    多项目时 admin/NOTIFY 每个项目各收一张；PM 只收自己项目的卡。
+    """每天09:00：按项目逐一洗盘，每个项目发一张卡给 admin+NOTIFY+该项目PM。
+    PM 只收自己项目的卡和建议；管理员收每个项目的卡 + 合并建议卡片。
     """
     from config import NOTIFY_OPEN_IDS
     try:
-        report = await _build_and_save_review()
-        review_text = _strip_merge_candidates_json(report) if report else None
+        effective_mode = _get_review_mode()
 
-        project_cards = _notify.get_morning_cards(review_text)
-        base_recipients = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS
-        if not base_recipients:
-            log.warning("no recipients configured (ADMIN_OPEN_IDS and NOTIFY_OPEN_IDS both empty)")
-
-        # 按项目分组 PM（role=pm, active）
         pm_by_project: dict[str, set[str]] = {}
         for user in db.list_users(role="pm", status="active"):
             uid = user["open_id"] or ""
@@ -456,12 +451,26 @@ async def _morning_review_and_report():
             if uid and proj:
                 pm_by_project.setdefault(proj, set()).add(uid)
 
+        # 按项目逐一洗盘并保存
+        review_by_project: dict[str, str | None] = {}  # stripped text，供早报卡片使用
+        full_reports: dict[str, str | None] = {}        # 含 JSON 候选，供建议卡片使用
+        for proj in db.list_projects(active_only=True):
+            name = proj["name"]
+            full_report = await _build_and_save_review(effective_mode, name)
+            full_reports[name] = full_report
+            review_by_project[name] = _strip_merge_candidates_json(full_report) if full_report else None
+
+        project_cards = _notify.get_morning_cards(review_by_project)
+        base_recipients = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS
+        if not base_recipients:
+            log.warning("no recipients configured (ADMIN_OPEN_IDS and NOTIFY_OPEN_IDS both empty)")
+
         # 每个项目发一张卡：base_recipients + 该项目 PM
         pm_open_ids: set[str] = set()
         project_count = 0
         for proj_name, card in project_cards.items():
             if proj_name is None:
-                continue  # 跳过全量汇总卡
+                continue  # 跳过兜底全量卡
             recipients = base_recipients | pm_by_project.get(proj_name, set())
             for uid in recipients:
                 await feishu.send_reply_to_user(uid, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
@@ -469,7 +478,7 @@ async def _morning_review_and_report():
                     pm_open_ids.add(uid)
             project_count += 1
 
-        # 兜底：无活跃项目时仍发全量卡给 base_recipients
+        # 兜底：无活跃项目时发全量卡给 base_recipients
         if project_count == 0:
             for uid in base_recipients:
                 await feishu.send_reply_to_user(uid, project_cards[None], FEISHU_APP_ID, FEISHU_APP_SECRET)
@@ -477,9 +486,21 @@ async def _morning_review_and_report():
         log.info("morning report sent: %d projects, base=%d, pm_extra=%d",
                  project_count, len(base_recipients), len(pm_open_ids))
 
-        # report_only：广播建议确认卡片；direct：action 已自动执行，不发卡片
-        if report and _get_review_mode() != _REVIEW_MODE_DIRECT:
-            await _broadcast_review_suggestions(ADMIN_OPEN_IDS | pm_open_ids, report)
+        if effective_mode != _REVIEW_MODE_DIRECT:
+            # PM 各收自己项目的建议卡片
+            for proj_name, full_report in full_reports.items():
+                if not full_report:
+                    continue
+                proj_pm_ids = pm_by_project.get(proj_name, set())
+                if proj_pm_ids:
+                    await _broadcast_review_suggestions(proj_pm_ids, full_report)
+            # 管理员收所有项目建议合并为一张卡片
+            all_items: list[dict] = []
+            for full_report in full_reports.values():
+                if full_report:
+                    all_items.extend(_collect_review_suggestion_items(full_report))
+            if all_items:
+                await _broadcast_suggestion_items(ADMIN_OPEN_IDS, all_items)
     except Exception:
         log.exception("morning review and report error")
 
@@ -1556,10 +1577,10 @@ async def _handle_bot_menu(event: dict):
             if user_role not in ("pm", "super_admin"):
                 await send("此功能仅限项目经理PM和管理员使用。")
                 return
-            review = db.get_latest_nightly_review()
-            review_text = _strip_merge_candidates_json(review) if review else None
             today = datetime.now().strftime("%m月%d日")
             query_project = project if user.get("project") else None
+            review = db.get_latest_nightly_review(query_project)
+            review_text = _strip_merge_candidates_json(review) if review else None
             risks = db.list_risks(status="open", project=query_project)
             card = feishu.build_morning_report_card(query_project or "", risks, review_text, today)
             await send(card)
@@ -1571,7 +1592,11 @@ async def _handle_bot_menu(event: dict):
                 await send("此功能仅限项目经理PM和管理员使用。")
                 return
             await send("开始 AI 洗盘，完成后会发送报告。")
-            result = await _handle_review_run("/review run")
+            result = await _handle_review_run(
+                "/review run",
+                project=project if user.get("project") else None,
+                user_role=user_role,
+            )
             await send(result)
             return
 
@@ -1930,7 +1955,7 @@ async def _handle_message(event: dict):
         if sub == "run":
             await feishu.send_reply(chat_id, "开始 AI 洗盘，完成后会发送报告。",
                                    FEISHU_APP_ID, FEISHU_APP_SECRET)
-            reply = await _handle_review_run(text)
+            reply = await _handle_review_run(text, project=project, user_role=user_role)
         else:
             reply = (
                 "洗盘命令：\n"
@@ -2461,26 +2486,87 @@ def _strip_action_command_lines(text: str) -> str:
     return out or "我已整理出待处理建议，请在确认卡片中逐条处理。"
 
 
-async def _run_review_and_broadcast(mode: str | None = None) -> tuple[str | None, int, int]:
-    """执行洗盘并广播报告。
-    report_only：发报告文字 + 建议确认卡片；direct：自动执行 + 仅发报告文字。
-    返回 (report, merge_count, action_count)。
+async def _run_review_and_broadcast(mode: str | None = None, project: str = "") -> tuple[str | None, int, int]:
+    """单项目洗盘并广播报告给管理员 + 该项目 PM。
+    返回 (full_report, merge_count, action_count)。
     """
     effective_mode = mode or _get_review_mode()
-    report = await _build_and_save_review(effective_mode)
+    report = await _build_and_save_review(effective_mode, project)
     if not report:
         return None, 0, 0
-    await _send_review_to_admins_pm(_strip_merge_candidates_json(report))
+    proj_pm_ids = _get_project_pm_ids(project)
+    recipients = set(ADMIN_OPEN_IDS) | proj_pm_ids
+    await _send_review_to_recipients(recipients, _strip_merge_candidates_json(report))
     review_items = _collect_review_suggestion_items(report)
     merge_count  = sum(1 for x in review_items if x["kind"] == "merge_fact")
     action_count = sum(1 for x in review_items if x["kind"] == "review_action")
     if effective_mode != _REVIEW_MODE_DIRECT:
-        # report_only：全卡片确认，不自动执行
-        await _broadcast_review_suggestions(_review_recipients_admins_pm(), report)
+        await _broadcast_suggestion_items(recipients, review_items)
     return report, merge_count, action_count
 
 
-async def _handle_review_run(text: str) -> str:
+async def _run_review_all_projects(mode: str | None = None) -> list[tuple[str, str | None, int, int]]:
+    """管理员：遍历所有活跃项目逐一洗盘。
+    PM 各收自己项目的建议卡片；管理员收合并后的全量建议卡片（一张）。
+    返回 [(project_name, report, merge_count, action_count), ...]。
+    """
+    effective_mode = mode or _get_review_mode()
+    projects = db.list_projects(active_only=True)
+
+    pm_by_project: dict[str, set[str]] = {}
+    for user in db.list_users(role="pm", status="active"):
+        uid = user["open_id"] or ""
+        proj = user["project"] or ""
+        if uid and proj:
+            pm_by_project.setdefault(proj, set()).add(uid)
+
+    results: list[tuple[str, str | None, int, int]] = []
+    all_admin_items: list[dict] = []
+
+    for proj in projects:
+        name = proj["name"]
+        report = await _build_and_save_review(effective_mode, name)
+        if not report:
+            results.append((name, None, 0, 0))
+            continue
+
+        proj_pm_ids = pm_by_project.get(name, set())
+        recipients = set(ADMIN_OPEN_IDS) | proj_pm_ids
+        await _send_review_to_recipients(recipients, _strip_merge_candidates_json(report))
+
+        items = _collect_review_suggestion_items(report)
+        merge_count  = sum(1 for x in items if x["kind"] == "merge_fact")
+        action_count = sum(1 for x in items if x["kind"] == "review_action")
+        results.append((name, report, merge_count, action_count))
+
+        if effective_mode != _REVIEW_MODE_DIRECT and items:
+            # PM 收自己项目的建议（admin 不在 pm_by_project 中）
+            if proj_pm_ids:
+                await _broadcast_suggestion_items(proj_pm_ids, items)
+            all_admin_items.extend(items)
+
+    # 管理员收所有项目建议合并成一张卡片
+    if effective_mode != _REVIEW_MODE_DIRECT and all_admin_items:
+        await _broadcast_suggestion_items(set(ADMIN_OPEN_IDS), all_admin_items)
+
+    return results
+
+
+def _review_all_summary(results: list[tuple[str, str | None, int, int]], mode: str) -> str:
+    done = [r[0] for r in results if r[1] is not None]
+    if not done:
+        return "当前没有 active 项目信息条目，未生成洗盘报告。"
+    total_merge  = sum(r[2] for r in results)
+    total_action = sum(r[3] for r in results)
+    suffix = _review_run_suffix(mode, total_merge, total_action)
+    return (
+        f"✓ 已完成 AI 洗盘（{_review_mode_label(mode)}），"
+        f"共 {len(done)} 个项目：{'、'.join(done)}，"
+        f"报告已发送给各项目相关人员。{suffix}"
+    )
+
+
+async def _handle_review_run(text: str, project: str | None = None, user_role: str = "pm") -> str:
     """PM/管理员均可用：/review run [report|direct]"""
     mode_args = text.split()[2:]  # 跳过 /review run
     mode = _get_review_mode()
@@ -2490,16 +2576,21 @@ async def _handle_review_run(text: str) -> str:
             return "模式只能是 report/仅报告 或 direct/直接清洗"
         mode = requested
 
-    report, merge_count, action_count = await _run_review_and_broadcast(mode)
-    if not report:
-        return "当前没有 active 项目信息条目，未生成洗盘报告。"
-
-    suffix = _review_run_suffix(mode, merge_count, action_count)
-    return f"✓ 已完成 AI 洗盘（{_review_mode_label(mode)}），报告已发送给所有管理员和 PM。{suffix}"
+    if user_role == "super_admin":
+        results = await _run_review_all_projects(mode)
+        return _review_all_summary(results, mode)
+    else:
+        if not project:
+            return "您当前未绑定项目，无法执行洗盘。请先绑定项目或联系管理员。"
+        report, merge_count, action_count = await _run_review_and_broadcast(mode, project)
+        if not report:
+            return f"项目「{project}」当前没有 active 信息条目，未生成洗盘报告。"
+        suffix = _review_run_suffix(mode, merge_count, action_count)
+        return f"✓ 已完成「{project}」AI 洗盘（{_review_mode_label(mode)}），报告已发送给相关人员。{suffix}"
 
 
 async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
-    # text 形如 "/admin review run" 或 "/admin review run report"（保留兼容）
+    # text 形如 "/admin review run" 或 "/admin review run report"
     mode_args = text.split()[3:]  # 跳过 /admin review run
     mode = _get_review_mode()
     if mode_args:
@@ -2508,12 +2599,8 @@ async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
             return "模式只能是 report/仅报告 或 direct/直接清洗"
         mode = requested
 
-    report, merge_count, action_count = await _run_review_and_broadcast(mode)
-    if not report:
-        return "当前没有 active 项目信息条目，未生成洗盘报告。"
-
-    suffix = _review_run_suffix(mode, merge_count, action_count)
-    return f"✓ 已完成手动 AI 洗盘（{_review_mode_label(mode)}），报告已发送给所有管理员和 PM。{suffix}"
+    results = await _run_review_all_projects(mode)
+    return _review_all_summary(results, mode).replace("AI 洗盘", "手动 AI 洗盘", 1)
 
 
 async def _handle_admin_user_approve_reject(text: str) -> str:

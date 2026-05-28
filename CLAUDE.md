@@ -209,16 +209,19 @@ name / description / created_by / active / updated_at
 - `/admin stats` 输出末行：「会话：X 个会话 / Y 条消息」（全局汇总）
 
 **洗盘相关**：
-- `save_nightly_review(content)` / `get_latest_nightly_review()` → 存取 AI 洗盘报告
-- `get_all_facts_for_review()` → 所有 active 非 report facts，供 AI 分析
+- `save_nightly_review(content, project)` / `get_latest_nightly_review(project=None)` → 按项目存取洗盘报告；`project=None` 时返回全局最新一条（兜底）
+- `get_all_facts_for_review(project)` → 指定项目的 active 非 report facts，供 AI 分析
 - `get_setting(key, default)` / `set_setting(key, value)` → 系统配置读写
 
 **洗盘边界**：
 - 洗盘对象是 `facts` 表，不包含 `todos`、`assumptions`、`org_units`
+- 洗盘**必须带 project**：每次洗盘只处理一个项目的数据，报告按项目分开存储（`facts.project` = 项目名，旧存量 `project='system'` 自然失效）
 - 报告结构：六节纯自然语言（建议归档/合并/状态更新/潜在风险/建议新增待办/数据健康总结）+ 两节机器可读 JSON（`===MERGE_CANDIDATES_JSON===` / `===ACTION_CANDIDATES_JSON===`）
 - `report_only` 模式：发送报告 + 弹出确认卡片，人工操作，不自动执行任何数据变更
 - `direct` 模式：从 `action_candidates` JSON 自动执行动作（close/archive/done/cancel），不发确认卡片
 - 合法动作：`(risk,close)` / `(fact,archive)` / `(todo,done)` / `(todo,cancel)`；不执行 delete、新增、正文改写
+- 管理员触发洗盘 → 遍历所有活跃项目逐一洗，各项目报告独立发送；PM 触发洗盘 → 仅洗自己绑定的项目（未绑定项目则报错）
+- 建议卡片：PM 只收自己项目的建议；管理员收所有项目建议合并为一张卡片
 
 ## AI 上下文注入顺序（ai_client.py）
 
@@ -465,7 +468,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - Web 后台飞书 OAuth：`SESSION_SECRET` 未配置时每次重启生成新密钥（重启后需重新登录），生产建议在 `.env` 固定配置
 
 ## 服务器当前状态
-- **当前版本：v1.0.11（本地完成，待部署）**
+- **当前版本：v1.1.0（本地完成，待部署）**
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（飞书 OAuth 认证，super_admin / pm 可访问）
 - Web 后台头部显示当前版本号（`/api/version` 接口读取 VERSION 文件）
 - Web 后台支持完整 URL 路由：tab 切换和编辑框均同步地址栏，支持浏览器前进/后退，可直接分享 `?tab=facts&edit=82` 深链
