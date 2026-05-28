@@ -21,8 +21,8 @@ _HTML = Path(__file__).parent / "static" / "admin.html"
 _SESSION_COOKIE = "pm_session"
 _SESSION_TTL = 8 * 3600  # 8 小时
 
-_FEISHU_AUTHORIZE = "https://open.feishu.cn/open-apis/authen/v1/authorize"
-_FEISHU_TOKEN = "https://open.feishu.cn/open-apis/authen/v1/oidc/access_token"
+_FEISHU_AUTHORIZE  = "https://open.feishu.cn/open-apis/authen/v1/authorize"
+_FEISHU_USER_TOKEN = "https://open.feishu.cn/open-apis/authen/v1/access_token"
 
 # ── Session helpers ─────────────────────────────────────────
 
@@ -79,12 +79,10 @@ async def admin_oauth_callback(code: str = "", error: str = ""):
     if error or not code:
         return HTMLResponse("<h3>授权失败，请关闭后重试</h3>", status_code=400)
 
-    basic = base64.b64encode(f"{FEISHU_APP_ID}:{FEISHU_APP_SECRET}".encode()).decode()
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            _FEISHU_TOKEN,
-            headers={"Authorization": f"Basic {basic}", "Content-Type": "application/json"},
-            json={"grant_type": "authorization_code", "code": code},
+            _FEISHU_USER_TOKEN,
+            json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET, "code": code},
             timeout=10,
         )
     data = resp.json().get("data", {})
