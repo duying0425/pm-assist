@@ -67,6 +67,21 @@ def _review_mode_label(mode: str) -> str:
     return "直接清洗" if mode == _REVIEW_MODE_DIRECT else "仅报告"
 
 
+def _review_run_suffix(mode: str, merge_count: int, action_count: int) -> str:
+    """构建洗盘完成提示的后缀，按模式区分是自动执行还是待确认。"""
+    parts = []
+    if merge_count:
+        parts.append(f"{merge_count} 组合并建议")
+    if action_count:
+        parts.append(f"{action_count} 项清洗建议")
+    if not parts:
+        return ""
+    joined = "、".join(parts)
+    if mode == _REVIEW_MODE_DIRECT:
+        return f" 已自动执行 {joined}。"
+    return f" 另发现 {joined}，请在卡片中逐条确认。"
+
+
 def _get_review_mode() -> str:
     mode = db.get_setting(_REVIEW_MODE_KEY, _REVIEW_MODE_REPORT)
     return mode if mode in {_REVIEW_MODE_REPORT, _REVIEW_MODE_DIRECT} else _REVIEW_MODE_REPORT
@@ -77,8 +92,20 @@ def _normalize_review_mode(value: str) -> str | None:
 
 
 def _apply_review_commands(report: str) -> list[str]:
-    """Execute only explicit low-risk [AUTO] commands from the AI report."""
+    """direct 模式：自动执行全部合并建议和清洗建议。"""
     results: list[str] = []
+
+    for item in _extract_merge_candidates(report):
+        keep_id = item.get("keep_id")
+        merge_ids = item.get("merge_ids", [])
+        if not keep_id or not merge_ids:
+            continue
+        try:
+            _apply_merge_item(item)
+            results.append(f"已合并 {', '.join(f'#{m}' for m in merge_ids)} → #{keep_id}")
+        except Exception as e:
+            results.append(f"合并失败 #{keep_id}：{e}")
+
     for item in _extract_action_candidates(report):
         kind   = item.get("kind", "")
         action = item.get("action", "")
@@ -108,6 +135,7 @@ def _apply_review_commands(report: str) -> list[str]:
             new_status = "done" if action == "done" else "cancelled"
             db.update_todo(fid, status=new_status)
             results.append(f"已{action} todo #{fid}：{title}")
+
     if not results:
         results.append("未发现可自动执行的动作。")
     return results
@@ -2249,13 +2277,8 @@ async def _handle_review_run(text: str) -> str:
     if not report:
         return "当前没有 active 项目信息条目，未生成洗盘报告。"
 
-    suffix_parts = []
-    if merge_count:
-        suffix_parts.append(f"{merge_count} 组合并建议")
-    if action_count:
-        suffix_parts.append(f"{action_count} 项清洗建议")
-    suffix = f" 另发现 {'、'.join(suffix_parts)}，请在卡片中逐条确认。" if suffix_parts else ""
-    return f"✓ 已完成 AI 洗盘（{_review_mode_label(mode)}），报告和建议卡片已发送给所有管理员和 PM。{suffix}"
+    suffix = _review_run_suffix(mode, merge_count, action_count)
+    return f"✓ 已完成 AI 洗盘（{_review_mode_label(mode)}），报告已发送给所有管理员和 PM。{suffix}"
 
 
 async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
@@ -2272,13 +2295,8 @@ async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
     if not report:
         return "当前没有 active 项目信息条目，未生成洗盘报告。"
 
-    suffix_parts = []
-    if merge_count:
-        suffix_parts.append(f"{merge_count} 组合并建议")
-    if action_count:
-        suffix_parts.append(f"{action_count} 项清洗建议")
-    suffix = f" 另发现 {'、'.join(suffix_parts)}，请在卡片中逐条确认。" if suffix_parts else ""
-    return f"✓ 已完成手动 AI 洗盘（{_review_mode_label(mode)}），报告和建议卡片已发送给所有管理员和 PM。{suffix}"
+    suffix = _review_run_suffix(mode, merge_count, action_count)
+    return f"✓ 已完成手动 AI 洗盘（{_review_mode_label(mode)}），报告已发送给所有管理员和 PM。{suffix}"
 
 
 async def _handle_admin_user_approve_reject(text: str) -> str:
