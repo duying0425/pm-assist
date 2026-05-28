@@ -3129,6 +3129,7 @@ def _handle_admin_stats() -> str:
         f"待办：open {todo_summary.get('open', 0)} | done {todo_summary.get('done', 0)}"
         f" | cancelled {todo_summary.get('cancelled', 0)}",
         f"最近洗盘：{stats['last_review']}",
+        f"会话：{stats['conv_chat_count']} 个会话 / {stats['conv_msg_count']} 条消息",
     ]
     return "\n".join(lines)
 

@@ -38,7 +38,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `1.0.0`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `1.0.1`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
 - 每次部署前修改 `VERSION`，本地 `git tag vX.Y.Z && git push --tags`，scp 时一并上传
 
@@ -177,6 +177,10 @@ name / description / created_by / active / updated_at
 
 **system_settings**：`key / value / updated_at`，当前使用项：`nightly_review_mode`（`report_only` 默认 | `direct_cleanup`）。
 
+**chat_bindings**：`chat_id(PRIMARY KEY) / project / created_at`，群聊 ID 与项目的绑定映射（`/admin project bind` 命令写入）。
+
+**user_chat_ids**：`open_id / chat_id`（联合唯一），用户与会话的多对多关系。每次收到消息自动写入，供 Web 管理后台统计每用户的会话数和消息数。
+
 `init_db()` 自动创建全部表和索引（幂等），含 facts/todos/conversations/processed_events 四个查询索引。
 
 ## 关键函数（db.py）
@@ -199,6 +203,10 @@ name / description / created_by / active / updated_at
 **assumptions CRUD**：`add_assumption / update_assumption / list_assumptions`
 
 **org_units CRUD**：`add_org_unit / list_org_units / upsert_person(open_id, name)`（@mention 自动缓存）
+
+**用户会话统计**：
+- `get_user_conv_stats()` → `{open_id: {chat_count, msg_count}}`，Web 管理后台 `/api/users` 用此为每个用户附加会话统计
+- `/admin stats` 输出末行：「会话：X 个会话 / Y 条消息」（全局汇总）
 
 **洗盘相关**：
 - `save_nightly_review(content)` / `get_latest_nightly_review()` → 存取 AI 洗盘报告
@@ -410,13 +418,14 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 | 6 | 洗盘动作建议 | `build_action_confirm_card(actions, chat_id)` | 解析到 `===ACTION_CANDIDATES_JSON===` |
 | 7 | Fact 详情（通用只读） | `build_fact_show_card(fact)` | `view_fact_detail` action |
 | 8 | 风险列表 | `build_risk_list_card(rows)` | `/risk list` |
-| 9 | 风险详情 | `build_risk_show_card(fact, open_todos)` | 卡片8点击"详情" / `/risk show` |
+| 9 | 风险详情 | `build_risk_show_card(fact, open_todos)` | 卡片8点击"详情" / `/risk show`；底部含「🔗 在后台编辑」链接 |
 | 10 | 待办列表 | `build_todo_list_card(rows)` | `/todo list` |
-| 11 | 待办详情 | `build_todo_show_card(todo, source_fact, plan_fact)` | 卡片10点击"详情" / `/todo show` |
-| 12 | 里程碑列表 | `build_milestone_list_card(rows)` | `/schedule list` |
-| 13 | 里程碑详情 | `build_milestone_show_card(fact, open_todos)` | `/schedule show` |
+| 11 | 待办详情 | `build_todo_show_card(todo, source_fact, plan_fact)` | 卡片10点击"详情" / `/todo show`；底部含「🔗 在后台编辑」链接 |
+| 12 | 里程碑列表 | `build_milestone_list_card(rows)` | `/schedule list`；每条附带「详情」按钮 |
+| 13 | 里程碑详情 | `build_milestone_show_card(fact, open_todos)` | `/schedule show`；底部含「🔗 在后台编辑」链接 |
 | 14 | AI 澄清问题 | `build_clarify_card(question, opts, chat_id, sender_open_id)` | 解析到 `===CLARIFY===` 块 |
 | 15 | 早报 | `build_morning_report_card(project_name, risks, review_text, today)` | 定时09:00 / `/review run` |
+| 16 | 人员信息 | `build_user_info_card(user, members=None, all_users=None)` | `admin_users` 快捷菜单；按角色分级：管理员总览（all_users）/ PM视图（members）/ 成员视图（仅自己） |
 
 **卡片交互 action 汇总**：
 
@@ -454,7 +463,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - 飞书 `mentions` 字段中**没有 `is_bot` 属性**；判断 Bot 是否被 @需对比 Bot 自身 open_id（启动时由 `/bot/v3/info` 拉取，存于全局 `BOT_OPEN_ID`）
 
 ## 服务器当前状态
-- **当前版本：v1.0.1（已部署）**
+- **当前版本：v1.0.1（已部署，本地与服务器同步）**
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - `init_db()` 自动创建所有表、索引、幂等执行种子数据，**无需手动迁移**（seed.py / seed_yadi.py / migrate_v2.py 均已内化删除）
 - 首次启动：自动创建 users/projects 表并种入「雅迪」项目；ADMIN_OPEN_IDS 用户首次发消息时自动注册为 super_admin
