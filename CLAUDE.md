@@ -19,7 +19,7 @@
 - 公网地址：`https://pm.tmhcorps.cn`（Cloudflare 代理 HTTP→HTTPS）
 - nginx 配置：`/etc/nginx/conf.d/apps.conf`（与 chat.tmhcorps.cn 共用）
 - 飞书 Webhook：`https://pm.tmhcorps.cn/webhook/feishu`
-- .env 位置：`~/pm-assist/.env`（含 FEISHU_APP_ID/SECRET/TOKEN、OPENROUTER_API_KEY、ADMIN_OPEN_IDS、NOTIFY_OPEN_IDS）
+- .env 位置：`~/pm-assist/.env`（含 FEISHU_APP_ID/SECRET/TOKEN、OPENROUTER_API_KEY、ADMIN_OPEN_IDS、NOTIFY_OPEN_IDS、SESSION_SECRET、ADMIN_REDIRECT_URI）
 
 ## AI 调用规范
 **必须用 OpenRouter 兼容接口，不得使用 anthropic 包。**
@@ -38,7 +38,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `1.0.1`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `1.0.2`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
 - 每次部署前修改 `VERSION`，本地 `git tag vX.Y.Z && git push --tags`，scp 时一并上传
 
@@ -461,10 +461,11 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - AI 洗盘 `direct` 模式自动执行，请先用 `/review run report` 观察建议质量再切换；`report_only` 为默认推荐模式
 - 飞书 `mentions` 字段中**没有 `is_bot` 属性**；判断 Bot 是否被 @需对比 Bot 自身 open_id（启动时由 `/bot/v3/info` 拉取，存于全局 `BOT_OPEN_ID`）
+- Web 后台飞书 OAuth：code 换 token 用 `POST /authen/v1/access_token` 请求体直接带 `app_id + app_secret + code`，无需先拿 app_access_token；`SESSION_SECRET` 未配置时每次重启生成新密钥（重启后需重新登录），生产建议固定配置
 
 ## 服务器当前状态
-- **当前版本：v1.0.1（已部署，本地与服务器同步）**
-- Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
+- **当前版本：v1.0.2（已部署）**
+- Web 后台地址：`https://pm.tmhcorps.cn/admin/`（飞书 OAuth 认证，super_admin / pm 可访问）
 - `init_db()` 自动创建所有表、索引、幂等执行种子数据，**无需手动迁移**（seed.py / seed_yadi.py / migrate_v2.py 均已内化删除）
 - 首次启动：自动创建 users/projects 表并种入「雅迪」项目；ADMIN_OPEN_IDS 用户首次发消息时自动注册为 super_admin
 - notify.py 的 crontab 条目已删除（早报改由 APScheduler 统一发送）
@@ -475,6 +476,6 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 
 ## 待开发
 - [x] systemd 自动重启（用户态 systemd 服务，已实现）
-- [ ] Web 后台登录认证（当前无认证，内部工具暂可接受）
+- [x] Web 后台登录认证（飞书 OAuth，super_admin / pm 角色可访问，已实现）
 - [ ] fact 正文重写：低质量描述生成结构化改写建议，建议走确认卡片，不直接自动覆盖
 - [ ] 多人协作卡片同步：同一批清洗建议任意一人处理后同步刷新其他人卡片状态（当前使用率不高，暂缓）
