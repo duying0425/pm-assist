@@ -158,6 +158,11 @@ def init_db():
                 value       TEXT    NOT NULL DEFAULT '',
                 updated_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
             );
+            CREATE TABLE IF NOT EXISTS user_chat_ids (
+                open_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                PRIMARY KEY (open_id, chat_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_facts_status_project    ON facts(status, project);
             CREATE INDEX IF NOT EXISTS idx_todos_status_project     ON todos(status, project);
             CREATE INDEX IF NOT EXISTS idx_conversations_chat_id    ON conversations(chat_id);
@@ -295,6 +300,24 @@ def add_message(chat_id: str, role: str, content: str):
 def clear_history(chat_id: str):
     with get_conn() as conn:
         conn.execute("DELETE FROM conversations WHERE chat_id=?", (chat_id,))
+
+
+def record_user_chat(open_id: str, chat_id: str):
+    if not open_id or not chat_id:
+        return
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO user_chat_ids(open_id, chat_id) VALUES(?,?)",
+            (open_id, chat_id),
+        )
+
+
+def get_chat_ids_for_user(open_id: str) -> list[str]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT chat_id FROM user_chat_ids WHERE open_id=?", (open_id,)
+        ).fetchall()
+    return [r["chat_id"] for r in rows]
 
 
 # ── facts 核心 CRUD ────────────────────────────────────────

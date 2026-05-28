@@ -1459,10 +1459,14 @@ async def _handle_bot_menu(event: dict):
         project = _resolve_project(chat_id, user)
 
         if event_key == "clear_chat":
-            db.clear_history(chat_id)
-            db.clear_pending(chat_id)
-            db.clear_pending_todos(chat_id)
-            db.clear_pending_commands(chat_id)
+            # 菜单事件无 chat_id，需通过 open_id 反查用户曾发过消息的所有 chat_id
+            all_chat_ids = db.get_chat_ids_for_user(open_id)
+            all_chat_ids.append(open_id)  # 兼容旧存量 / P2P
+            for cid in all_chat_ids:
+                db.clear_history(cid)
+                db.clear_pending(cid)
+                db.clear_pending_todos(cid)
+                db.clear_pending_commands(cid)
             await send("对话历史已清除。")
             return
 
@@ -1677,9 +1681,17 @@ async def _handle_message(event: dict):
 
     msg_type = message.get("message_type", "")
     chat_id = message.get("chat_id", "")
+    chat_type = message.get("chat_type", "")
     sender_open_id = sender.get("sender_id", {}).get("open_id", "")
 
-    log.info("chat_id=%s sender=%s msg_type=%s", chat_id, sender_open_id, msg_type)
+    log.info("chat_id=%s sender=%s msg_type=%s chat_type=%s", chat_id, sender_open_id, msg_type, chat_type)
+    db.record_user_chat(sender_open_id, chat_id)
+
+    # 群聊中只响应 @Bot 的消息
+    if chat_type == "group":
+        bot_mentioned = any(m.get("is_bot", False) for m in message.get("mentions", []))
+        if not bot_mentioned:
+            return
 
     if msg_type not in ("text", "post"):
         return
