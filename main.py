@@ -435,40 +435,47 @@ async def _broadcast_review_suggestions(open_ids: set[str], report: str):
 
 
 async def _morning_review_and_report():
-    """每天09:00：先执行AI洗盘，再发送风险日报 + 洗盘报告给所有收件人。
-    - 管理员/NOTIFY：发全项目综合卡片（含AI洗盘摘要）+ 建议确认卡片
-    - PM用户：发其所属项目的专属卡片（含AI洗盘摘要）+ 建议确认卡片
-    注意：如果同时开了 crontab 跑 notify.py，主管理员会收到两次，二选一即可。
+    """每天09:00：AI洗盘后，每个项目发一张卡给 admin+NOTIFY+该项目PM。
+    多项目时 admin/NOTIFY 每个项目各收一张；PM 只收自己项目的卡。
     """
     from config import NOTIFY_OPEN_IDS
     try:
         report = await _build_and_save_review()
         review_text = _strip_merge_candidates_json(report) if report else None
 
-        # 按项目生成卡片（PM 卡片也带洗盘摘要）
         project_cards = _notify.get_morning_cards(review_text)
-
-        # 管理员 + NOTIFY 接全量卡片
-        admin_recipients = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS
-        if not admin_recipients:
+        base_recipients = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS
+        if not base_recipients:
             log.warning("no recipients configured (ADMIN_OPEN_IDS and NOTIFY_OPEN_IDS both empty)")
-        for uid in admin_recipients:
-            await feishu.send_reply_to_user(uid, project_cards[None], FEISHU_APP_ID, FEISHU_APP_SECRET)
 
-        # PM 用户：收自己项目的卡片（不重复发给已在 admin_recipients 的人）
+        # 按项目分组 PM（role=pm, active）
+        pm_by_project: dict[str, set[str]] = {}
+        for user in db.list_users(role="pm", status="active"):
+            uid = user["open_id"] or ""
+            proj = user["project"] or ""
+            if uid and proj:
+                pm_by_project.setdefault(proj, set()).add(uid)
+
+        # 每个项目发一张卡：base_recipients + 该项目 PM
         pm_open_ids: set[str] = set()
-        pm_users = db.list_users(role="pm", status="active")
-        for user in pm_users:
-            uid = user.get("open_id", "")
-            proj = user.get("project", "")
-            if not uid or uid in admin_recipients:
-                continue
-            pm_open_ids.add(uid)
-            card = project_cards.get(proj, project_cards[None])
-            await feishu.send_reply_to_user(uid, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        project_count = 0
+        for proj_name, card in project_cards.items():
+            if proj_name is None:
+                continue  # 跳过全量汇总卡
+            recipients = base_recipients | pm_by_project.get(proj_name, set())
+            for uid in recipients:
+                await feishu.send_reply_to_user(uid, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+                if uid not in base_recipients:
+                    pm_open_ids.add(uid)
+            project_count += 1
 
-        log.info("morning report sent: %d admins/notify + %d PMs",
-                 len(admin_recipients), len(pm_users))
+        # 兜底：无活跃项目时仍发全量卡给 base_recipients
+        if project_count == 0:
+            for uid in base_recipients:
+                await feishu.send_reply_to_user(uid, project_cards[None], FEISHU_APP_ID, FEISHU_APP_SECRET)
+
+        log.info("morning report sent: %d projects, base=%d, pm_extra=%d",
+                 project_count, len(base_recipients), len(pm_open_ids))
 
         # report_only：广播建议确认卡片；direct：action 已自动执行，不发卡片
         if report and _get_review_mode() != _REVIEW_MODE_DIRECT:
@@ -1578,7 +1585,7 @@ async def _handle_bot_menu(event: dict):
                 my_project = (my_user or {}).get("project", "")
                 if my_project:
                     members = [dict(u) for u in db.list_users()
-                               if u.get("project") == my_project and u.get("open_id") != open_id]
+                               if u["project"] == my_project and u["open_id"] != open_id]
                 else:
                     members = []
                 card = feishu.build_user_info_card(my_user or {}, members=members)
