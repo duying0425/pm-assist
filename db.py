@@ -748,18 +748,32 @@ def get_full_context(project: str | None = None) -> dict:
             ).fetchall()
 
         # Layer 4: 决策（dimension=decision）
-        decision_rows = conn.execute(
-            "SELECT id, title, body, created_at, updated_at FROM facts"
-            " WHERE dimension='decision' AND status='active'"
-            " ORDER BY id"
-        ).fetchall()
+        if not cross_project:
+            decision_rows = conn.execute(
+                "SELECT id, title, body, created_at, updated_at FROM facts"
+                " WHERE dimension='decision' AND status='active' AND project=?"
+                " ORDER BY id", (project,)
+            ).fetchall()
+        else:
+            decision_rows = conn.execute(
+                "SELECT id, title, body, created_at, updated_at FROM facts"
+                " WHERE dimension='decision' AND status='active'"
+                " ORDER BY project, id"
+            ).fetchall()
 
         # Layer 5: 相关方 + 资源（stakeholder/resource/scope）
-        ref_rows = conn.execute(
-            "SELECT id, type, title, body, updated_at FROM facts"
-            " WHERE dimension IN ('stakeholder','resource','scope') AND status='active'"
-            " ORDER BY dimension, id"
-        ).fetchall()
+        if not cross_project:
+            ref_rows = conn.execute(
+                "SELECT id, type, title, body, updated_at FROM facts"
+                " WHERE dimension IN ('stakeholder','resource','scope') AND status='active' AND project=?"
+                " ORDER BY dimension, id", (project,)
+            ).fetchall()
+        else:
+            ref_rows = conn.execute(
+                "SELECT id, type, title, body, updated_at FROM facts"
+                " WHERE dimension IN ('stakeholder','resource','scope') AND status='active'"
+                " ORDER BY project, dimension, id"
+            ).fetchall()
 
     def fmt_assumption(rows):
         if not rows:

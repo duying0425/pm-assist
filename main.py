@@ -1597,10 +1597,13 @@ async def _handle_bot_menu(event: dict):
 
 
 def _resolve_project(chat_id: str, user: dict) -> str | None:
-    """确定本次对话的项目：群聊绑定 > 用户绑定 > 管理员返回 None（全量）> 默认。"""
-    binding = db.get_chat_binding(chat_id)
-    if binding:
-        return binding
+    """确定本次对话的项目：群聊绑定 > 用户绑定 > 管理员返回 None（全量）> 默认。
+    群聊（oc_ 开头）才查 chat_bindings；单聊直接走用户绑定，跟着"人"走。
+    """
+    if chat_id.startswith("oc_"):
+        binding = db.get_chat_binding(chat_id)
+        if binding:
+            return binding
     p = user.get("project", "")
     if p:
         return p
@@ -1857,6 +1860,21 @@ async def _handle_message(event: dict):
 
     # 确定本次对话所属项目
     project = _resolve_project(chat_id, user)
+
+    # 群聊自动绑定：PM/管理员在未绑定群聊首次发消息时，自动绑定到其项目并提示
+    if (chat_id.startswith("oc_")
+            and user_role in ("pm", "super_admin")
+            and user.get("project")
+            and not db.get_chat_binding(chat_id)):
+        proj_to_bind = user.get("project")
+        db.set_chat_binding(chat_id, proj_to_bind)
+        project = proj_to_bind
+        await feishu.send_reply(
+            chat_id,
+            f"ℹ️ 已将本群自动绑定到项目「{proj_to_bind}」。\n"
+            "如需更改，管理员可发 /admin project bind [项目名] 重新绑定。",
+            FEISHU_APP_ID, FEISHU_APP_SECRET,
+        )
 
     # ── 管理员专用命令 ──
     if user_role in ("pm", "super_admin") and await _handle_text_confirmation(chat_id, text):
