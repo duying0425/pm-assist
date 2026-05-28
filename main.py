@@ -1596,11 +1596,11 @@ async def _handle_bot_menu(event: dict):
         log.exception("_handle_bot_menu error event_key=%s", event.get("event_key", ""))
 
 
-def _resolve_project(chat_id: str, user: dict) -> str | None:
+def _resolve_project(chat_id: str, user: dict, chat_type: str = "group") -> str | None:
     """确定本次对话的项目：群聊绑定 > 用户绑定 > 管理员返回 None（全量）> 默认。
-    群聊（oc_ 开头）才查 chat_bindings；单聊直接走用户绑定，跟着"人"走。
+    只有群聊（chat_type=group）才查 chat_bindings；单聊跟着"人"走。
     """
-    if chat_id.startswith("oc_"):
+    if chat_type == "group":
         binding = db.get_chat_binding(chat_id)
         if binding:
             return binding
@@ -1859,10 +1859,10 @@ async def _handle_message(event: dict):
         return
 
     # 确定本次对话所属项目
-    project = _resolve_project(chat_id, user)
+    project = _resolve_project(chat_id, user, chat_type)
 
     # 群聊自动绑定：PM/管理员在未绑定群聊首次发消息时，自动绑定到其项目并提示
-    if (chat_id.startswith("oc_")
+    if (chat_type == "group"
             and user_role in ("pm", "super_admin")
             and user.get("project")
             and not db.get_chat_binding(chat_id)):
