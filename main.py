@@ -111,6 +111,20 @@ def _apply_review_commands(report: str) -> list[str]:
         action = item.get("action", "")
         fid    = item.get("id")
         title  = item.get("title", f"#{fid}")
+        if kind == "new_todo" and action == "add":
+            try:
+                db.add_todo(
+                    item.get("title", ""),
+                    body=item.get("body", ""),
+                    priority=item.get("priority", "") or "medium",
+                    owner=item.get("owner", ""),
+                    due_date=item.get("due_date", ""),
+                    source="ai",
+                )
+                results.append(f"已新增待办：{title}")
+            except Exception as e:
+                results.append(f"新增待办失败：{e}")
+            continue
         if not fid:
             continue
         if kind == "fact" and action == "archive":
@@ -202,6 +216,25 @@ def _extract_action_candidates(report: str) -> list[dict]:
     for item in payload.get("action_candidates", []):
         kind = str(item.get("kind", "")).lower()
         action = str(item.get("action", "")).lower()
+
+        if kind == "new_todo" and action == "add":
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            candidates.append({
+                "kind": "new_todo",
+                "id": None,
+                "action": "add",
+                "title": title[:80],
+                "body": str(item.get("body", "")),
+                "priority": str(item.get("priority", "medium")),
+                "owner": str(item.get("owner", "")),
+                "due_date": str(item.get("due_date", "")),
+                "reason": str(item.get("reason", ""))[:300],
+                "type_label": "",
+            })
+            continue
+
         try:
             item_id = int(item.get("id"))
         except Exception:
@@ -355,10 +388,14 @@ def _collect_review_suggestion_items(report: str) -> list[dict]:
     for c in _extract_action_candidates(report):
         items.append({
             "kind":     "review_action",
-            "sub_kind": c.get("kind"),    # "risk" / "fact" / "todo"
-            "action":   c.get("action"),  # "close" / "archive" / "done" / "cancel"
+            "sub_kind": c.get("kind"),    # "risk" / "fact" / "todo" / "new_todo"
+            "action":   c.get("action"),  # "close" / "archive" / "done" / "cancel" / "add"
             "id":       c.get("id"),
             "title":    c.get("title", ""),
+            "body":     c.get("body", ""),
+            "priority": c.get("priority", ""),
+            "owner":    c.get("owner", ""),
+            "due_date": c.get("due_date", ""),
             "reason":   c.get("reason", ""),
         })
     return items
@@ -628,6 +665,16 @@ def _card_merge_all(value: dict, chat_id: str) -> dict:
 def _apply_review_action(item: dict):
     kind = item.get("kind")
     action = item.get("action")
+    if kind == "new_todo" and action == "add":
+        db.add_todo(
+            item.get("title", ""),
+            body=item.get("body", ""),
+            priority=item.get("priority", "") or "medium",
+            owner=item.get("owner", ""),
+            due_date=item.get("due_date", ""),
+            source="ai",
+        )
+        return
     item_id = int(item["id"])
     if kind == "risk" and action == "close":
         db.update_risk(item_id, status="closed")
@@ -1081,9 +1128,14 @@ def _save_suggestion_item(item: dict) -> bool:
             })
         elif kind == "review_action":
             _apply_review_action({
-                "kind":   item.get("sub_kind"),
-                "action": item.get("action"),
-                "id":     item.get("id"),
+                "kind":     item.get("sub_kind"),
+                "action":   item.get("action"),
+                "id":       item.get("id"),
+                "title":    item.get("title", ""),
+                "body":     item.get("body", ""),
+                "priority": item.get("priority", ""),
+                "owner":    item.get("owner", ""),
+                "due_date": item.get("due_date", ""),
             })
         return True
     except Exception:

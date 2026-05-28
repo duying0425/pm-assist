@@ -577,6 +577,7 @@ _SUGGESTION_SECTIONS = [
 _REVIEW_ACTION_LABELS = {
     "close": "关闭风险", "archive": "归档信息",
     "done": "完成待办", "cancel": "取消待办",
+    "add": "新增待办",
 }
 
 
@@ -641,8 +642,13 @@ def _suggestion_row_text(item: dict) -> str:
         sub_kind = item.get("sub_kind", "")
         action = item.get("action", "")
         label = _REVIEW_ACTION_LABELS.get(action, action)
-        prefix = "#T" if sub_kind == "todo" else "#"
         reason = (item.get("reason") or "")[:50]
+        if sub_kind == "new_todo":
+            owner = item.get("owner", "")
+            due = item.get("due_date", "")
+            meta = "  ".join(filter(None, [owner and f"负责：{owner}", due and f"截止：{due}"]))
+            return f"**{label}**{status_tag} {item.get('title', '')}\n{meta or reason}"
+        prefix = "#T" if sub_kind == "todo" else "#"
         return f"**{label}** {prefix}{item.get('id', '')}{status_tag}\n{reason}"
 
     # update_fact / update_todo
@@ -804,17 +810,32 @@ def build_suggestion_detail_card(item: dict, chat_id: str, index: int) -> dict:
         sub_kind = item.get("sub_kind", "")
         action = item.get("action", "")
         label = _REVIEW_ACTION_LABELS.get(action, action)
-        prefix = "#T" if sub_kind == "todo" else "#"
         reason = item.get("reason", "")
         title = item.get("title", "")
-        meta = (
-            f"**建议操作**  {label}\n"
-            f"**目标**  {prefix}{item.get('id', '')} {title}\n"
-            f"**原因**  {reason}"
-        )
+        if sub_kind == "new_todo":
+            parts = [f"**建议操作**  {label}", f"**标题**  {title}"]
+            if item.get("priority"):
+                parts.append(f"**优先级**  {item['priority']}")
+            if item.get("owner"):
+                parts.append(f"**负责人**  {item['owner']}")
+            if item.get("due_date"):
+                parts.append(f"**截止**  {item['due_date']}")
+            if item.get("body"):
+                parts.append(f"**说明**  {item['body']}")
+            parts.append(f"**原因**  {reason}")
+            meta = "\n".join(parts)
+            header_text = f"{label}：{title[:30]}"
+            header_color = "green"
+        else:
+            prefix = "#T" if sub_kind == "todo" else "#"
+            meta = (
+                f"**建议操作**  {label}\n"
+                f"**目标**  {prefix}{item.get('id', '')} {title}\n"
+                f"**原因**  {reason}"
+            )
+            header_text = f"{label}：{prefix}{item.get('id', '')} {title[:30]}"
+            header_color = "red" if action in ("close", "archive") else "blue"
         elements = [_md(meta)]
-        header_text = f"{label}：{prefix}{item.get('id', '')} {title[:30]}"
-        header_color = "red" if action in ("close", "archive") else "blue"
 
     else:  # update_fact / update_todo
         prefix = "#T" if kind == "update_todo" else "#"

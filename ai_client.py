@@ -178,7 +178,7 @@ _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析
 
 ## 八、机器可读动作建议
 ===ACTION_CANDIDATES_JSON===
-{{"action_candidates":[{{"kind":"risk","id":12,"action":"close","reason":"风险已解决"}},{{"kind":"fact","id":18,"action":"archive","reason":"信息已过期"}},{{"kind":"todo","id":7,"action":"done","reason":"待办已完成"}},{{"kind":"todo","id":8,"action":"cancel","reason":"不再需要"}}]}}
+{{"action_candidates":[{{"kind":"risk","id":12,"action":"close","reason":"风险已解决"}},{{"kind":"fact","id":18,"action":"archive","reason":"信息已过期"}},{{"kind":"todo","id":7,"action":"done","reason":"待办已完成"}},{{"kind":"todo","id":8,"action":"cancel","reason":"不再需要"}},{{"kind":"new_todo","action":"add","title":"联系华阳确认BSP完成时间","body":"","priority":"medium","owner":"规控团队","due_date":"2026-06-01","reason":"风险#12缺乏跟进行动"}}]}}
 ===END_ACTION_CANDIDATES_JSON===
 
 ---
