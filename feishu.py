@@ -54,7 +54,7 @@ def _card(elements: list, header: dict | None = None,
     """构建 schema 2.0 卡片 dict。"""
     c: dict = {
         "schema": "2.0",
-        "config": {"wide_screen_mode": wide, "enable_forward": forward},
+        "config": {"wide_screen_mode": wide, "enable_forward": forward, "update_multi": True},
         "body": {"elements": elements},
     }
     if header:
@@ -71,7 +71,7 @@ def _resp(toast_type: str, toast_content: str, elements: list,
     """构建卡片回调响应 dict（schema 2.0）。"""
     data: dict = {
         "schema": "2.0",
-        "config": {"enable_forward": False},
+        "config": {"enable_forward": False, "update_multi": True},
         "body": {"elements": elements},
     }
     if header:

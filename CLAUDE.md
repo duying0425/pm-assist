@@ -465,7 +465,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - Web 后台飞书 OAuth：`SESSION_SECRET` 未配置时每次重启生成新密钥（重启后需重新登录），生产建议在 `.env` 固定配置
 
 ## 服务器当前状态
-- **当前版本：v1.0.8（已部署）**
+- **当前版本：v1.0.9（本地完成，待部署）**
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（飞书 OAuth 认证，super_admin / pm 可访问）
 - Web 后台头部显示当前版本号（`/api/version` 接口读取 VERSION 文件）
 - Web 后台支持完整 URL 路由：tab 切换和编辑框均同步地址栏，支持浏览器前进/后退，可直接分享 `?tab=facts&edit=82` 深链

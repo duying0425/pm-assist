@@ -28,6 +28,7 @@
 | v1.0.6 | 已部署 | 修复单聊项目绑定：Feishu p2p 与群聊 chat_id 同为 oc_ 开头，改用 chat_type 字段区分；单聊彻底跳过 chat_bindings |
 | v1.0.7 | 已部署 | Web 后台头部显示版本号（/api/version 接口 + header-version 展示）|
 | v1.0.8 | 已部署 | 修复群聊 @Bot mention 未剥除导致命令解析错误；群聊切换项目绑定时自动清空对话历史并提示 |
+| v1.0.9 | 本地完成 | 修复卡片"全部保存"报错 -356：_card() 和 _resp() 的 config 补充 update_multi:true，满足 schema 2.0 卡片更新要求 |
 
 ## 已实现功能清单
 
