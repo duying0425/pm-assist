@@ -62,6 +62,13 @@ def require_auth(request: Request) -> dict:
     return session
 
 
+def require_super_admin(session: dict = Depends(require_auth)) -> dict:
+    """API dependency：非 super_admin 返回 403。"""
+    if session.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return session
+
+
 # ── Auth routes ─────────────────────────────────────────────
 
 
@@ -160,7 +167,7 @@ def api_stats(session: dict = Depends(require_auth)):
 
 
 @router.patch("/api/settings/review-mode")
-def api_update_review_mode(data: dict, session: dict = Depends(require_auth)):
+def api_update_review_mode(data: dict, session: dict = Depends(require_super_admin)):
     mode = data.get("mode", "")
     if mode not in ("report_only", "direct_cleanup"):
         return {"error": "mode must be report_only or direct_cleanup"}
@@ -176,7 +183,7 @@ def api_list_projects(session: dict = Depends(require_auth)):
 
 
 @router.post("/api/projects")
-def api_create_project(data: dict, session: dict = Depends(require_auth)):
+def api_create_project(data: dict, session: dict = Depends(require_super_admin)):
     try:
         pid = db.add_project(data["name"], data.get("description", ""))
         return {"id": pid}
@@ -280,7 +287,7 @@ def api_list_users(
 
 
 @router.patch("/api/users/{open_id}")
-def api_update_user(open_id: str, data: dict, session: dict = Depends(require_auth)):
+def api_update_user(open_id: str, data: dict, session: dict = Depends(require_super_admin)):
     db.update_user(open_id, **data)
     return {"ok": True}
 

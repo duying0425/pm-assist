@@ -278,6 +278,7 @@ const SCOPE_S = {global:['#ede9fe','#5b21b6'],dept:['#dbeafe','#1e40af'],project
 // ── State ─────────────────────────────────────────────────
 let projects=[], lastFacts=[], lastTodos=[], lastUsers=[], lastAssumptions=[], modalCb=null;
 let currentTab='stats', _noPush=false;
+let currentUser={};
 
 // ── API ───────────────────────────────────────────────────
 async function api(method,path,data){
@@ -348,7 +349,7 @@ async function loadStats(){
     <div class="mini-grid">
       <div class="mini-card"><h4>知识库分布</h4>${Object.entries(TYPE_ZH).filter(([t])=>fm[t]).map(([t])=>`<div class="mini-row">${tbdg(t)}<span>${fm[t]} 条</span></div>`).join('')||'<span style="color:var(--muted)">暂无</span>'}</div>
       <div class="mini-card"><h4>待办统计</h4>${['open','done','cancelled'].map(s=>`<div class="mini-row">${tsbdg(s)}<span>${tm[s]||0} 条</span></div>`).join('')}</div>
-      <div class="mini-card"><h4>最近 AI 洗盘</h4><div style="color:var(--muted);font-size:13px;margin-bottom:10px">${esc(stats.last_review)}</div><div class="mini-row"><span>模式</span><strong>${stats.review_mode==='direct_cleanup'?'直接清洗':'仅报告'}</strong></div><div style="display:flex;gap:6px;margin-top:10px"><button class="btn btn-sm ${stats.review_mode==='report_only'?'btn-primary':''}" onclick="setReviewMode('report_only')">仅报告</button><button class="btn btn-sm ${stats.review_mode==='direct_cleanup'?'btn-primary':''}" onclick="setReviewMode('direct_cleanup')">直接清洗</button></div></div>
+      <div class="mini-card"><h4>最近 AI 洗盘</h4><div style="color:var(--muted);font-size:13px;margin-bottom:10px">${esc(stats.last_review)}</div><div class="mini-row"><span>模式</span><strong>${stats.review_mode==='direct_cleanup'?'直接清洗':'仅报告'}</strong></div>${currentUser.role==='super_admin'?`<div style="display:flex;gap:6px;margin-top:10px"><button class="btn btn-sm ${stats.review_mode==='report_only'?'btn-primary':''}" onclick="setReviewMode('report_only')">仅报告</button><button class="btn btn-sm ${stats.review_mode==='direct_cleanup'?'btn-primary':''}" onclick="setReviewMode('direct_cleanup')">直接清洗</button></div>`:''}</div>
     </div>`;
 }
 async function setReviewMode(mode){
@@ -454,10 +455,10 @@ async function loadUsers(){
     <td>${usbdg(u.status)}</td>
     <td class="date" style="text-align:center">${u.conv_msg_count?`<span title="${u.conv_chat_count}个会话·${u.conv_msg_count}条消息" style="cursor:default">${u.conv_msg_count}</span>`:'—'}</td>
     <td class="date">${fd(u.created_at)}</td>
-    <td><div class="actions">${u.status==='pending'
+    <td><div class="actions">${currentUser.role==='super_admin'?(u.status==='pending'
       ?`<button class="btn btn-sm btn-success-ghost" onclick="approveUser('${escA(u.open_id)}','${escA(u.role)}','${escA(u.project)}')">批准</button><button class="btn btn-sm btn-danger-ghost" onclick="rejectUser('${escA(u.open_id)}')">拒绝</button>`
-      :`<button class="btn btn-sm" onclick="editUser('${escA(u.open_id)}')">编辑</button>`
-    }</div></td>
+      :`<button class="btn btn-sm" onclick="editUser('${escA(u.open_id)}')">编辑</button>`)
+    :''}</div></td>
   </tr>`).join('');
 }
 async function approveUser(oid,role,project){await api('PATCH',`/users/${encodeURIComponent(oid)}`,{status:'active',role,project});loadUsers();}
@@ -581,6 +582,7 @@ window.addEventListener('popstate', async () => {
 // ── Init ──────────────────────────────────────────────────
 async function init(){
   const [me, ver]=await Promise.all([api('GET','/me'), api('GET','/version')]);
+  currentUser=me;
   document.getElementById('header-user').textContent=`${me.name}（${me.role==='super_admin'?'管理员':'PM'}）`;
   document.getElementById('header-version').textContent=`v${ver.version}`;
   const p=new URLSearchParams(window.location.search);
