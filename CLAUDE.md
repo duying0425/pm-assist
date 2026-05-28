@@ -38,7 +38,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `1.0.2`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `1.0.3`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
 - 每次部署前修改 `VERSION`，本地 `git tag vX.Y.Z && git push --tags`，scp 时一并上传
 
@@ -465,8 +465,9 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - Web 后台飞书 OAuth：`SESSION_SECRET` 未配置时每次重启生成新密钥（重启后需重新登录），生产建议在 `.env` 固定配置
 
 ## 服务器当前状态
-- **当前版本：v1.0.2（已部署）**
+- **当前版本：v1.0.3（已部署）**
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（飞书 OAuth 认证，super_admin / pm 可访问）
+- Web 后台支持完整 URL 路由：tab 切换和编辑框均同步地址栏，支持浏览器前进/后退，可直接分享 `?tab=facts&edit=82` 深链
 - `init_db()` 自动创建所有表、索引、幂等执行种子数据，**无需手动迁移**（seed.py / seed_yadi.py / migrate_v2.py 均已内化删除）
 - 首次启动：自动创建 users/projects 表并种入「雅迪」项目；ADMIN_OPEN_IDS 用户首次发消息时自动注册为 super_admin
 - notify.py 的 crontab 条目已删除（早报改由 APScheduler 统一发送）

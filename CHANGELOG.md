@@ -22,6 +22,7 @@
 | v1.0.0 | 已部署 | 洗盘报告优化：六节纯自然语言+两节机器可读 JSON；direct 模式从 action_candidates JSON 执行；新增 view_morning_report 快捷菜单；AI 对话超时升至 90s |
 | v1.0.1 | 已部署 | 里程碑列表详情按钮；风险/待办/里程碑详情卡片加后台编辑链接；admin_users 人员信息卡片按角色分级展示；/admin stats 加会话统计；修复群聊 @Bot 不响应问题 |
 | v1.0.2 | 已部署 | Web 后台飞书 OAuth 认证（super_admin / pm 可访问）；DB 表补充 chat_bindings / user_chat_ids；会话统计 API |
+| v1.0.3 | 已部署 | Web 后台完整 URL 路由：tab 切换/编辑框同步地址栏，支持浏览器前进/后退和深链直达 |
 
 ## 已实现功能清单
 
