@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -474,13 +475,39 @@ async def _morning_review_and_report():
         log.exception("morning review and report error")
 
 
+def _do_db_backup():
+    backup_dir = Path("backups")
+    backup_dir.mkdir(exist_ok=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    dest = backup_dir / f"pm_assist_{today}.db"
+    if dest.exists():
+        return
+    src = sqlite3.connect(db.DB_PATH)
+    bak = sqlite3.connect(str(dest))
+    src.backup(bak)
+    bak.close()
+    src.close()
+    kept = sorted(backup_dir.glob("pm_assist_*.db"))
+    for old in kept[:-7]:
+        old.unlink()
+    log.info("DB backup: %s", dest.name)
+
+
+async def _backup_db():
+    try:
+        await asyncio.to_thread(_do_db_backup)
+    except Exception:
+        log.exception("DB backup error")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
     log.info("DB initialized")
     _scheduler.add_job(_morning_review_and_report, "cron", hour=9, minute=0, id="morning_report")
+    _scheduler.add_job(_backup_db, "cron", hour=3, minute=0, id="db_backup")
     _scheduler.start()
-    log.info("Scheduler started: morning_review_and_report@09:00 (Asia/Shanghai)")
+    log.info("Scheduler started: morning_review@09:00, db_backup@03:00 (Asia/Shanghai)")
     yield
     _scheduler.shutdown()
 

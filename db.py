@@ -177,6 +177,8 @@ def init_db():
         _migrate_dimension(conn)
         _seed_initial_project(conn)
         _migrate_project_names(conn)
+        _seed_assumptions(conn)
+        _seed_org_units(conn)
 
 
 def _migrate_legacy(conn):
@@ -254,6 +256,85 @@ def _seed_initial_project(conn):
             "INSERT INTO projects(name, description, created_by) VALUES(?,?,?)",
             ("雅迪", "雅迪自动驾驶量产项目", "system"),
         )
+
+
+_ASSUMPTION_SEEDS = [
+    {"scope": "dept", "scope_ref": "", "confidence": "universal",
+     "title": "PM角色边界",
+     "body": "PM不直接管理工程师，职责是协调各团队、推进节点、管理风险和对外沟通。遇到技术决策找架构师，遇到资源排期找团队负责人。"},
+    {"scope": "dept", "scope_ref": "", "confidence": "universal",
+     "title": "产品定位",
+     "body": "当前业务为定点后智驾解决方案开发，非平台类产品。每个项目面向特定OEM客户交付，方案高度定制化，不可直接复用到其他客户项目。"},
+    {"scope": "dept", "scope_ref": "", "confidence": "universal",
+     "title": "ASPICE流程执行原则",
+     "body": "项目遵循ASPICE流程精神指导，但根据团队规模和成本约束灵活裁剪，非严格按标准执行全套活动。裁剪决策需由PM记录并与客户对齐。"},
+    {"scope": "dept", "scope_ref": "", "confidence": "common",
+     "title": "OEM客户决策周期",
+     "body": "OEM客户内部签字确认流程通常需要1-2周。范围变更、交付物确认、合同补充需提前预留此周期，不能按开发完成时间倒推。"},
+    {"scope": "dept", "scope_ref": "", "confidence": "common",
+     "title": "书面确认原则",
+     "body": "重要决策、范围变更、接口定义须有书面记录（邮件或飞书消息）。口头确认风险高，客户沟通后需主动发确认邮件收口。"},
+    {"scope": "dept", "scope_ref": "", "confidence": "common",
+     "title": "外部依赖响应周期",
+     "body": "硬件验证、工具链获取、第三方SDK提供等存在外部供应商依赖，响应周期通常1-2周。相关里程碑需在节点前2周触发跟进动作。"},
+    {"scope": "dept", "scope_ref": "", "confidence": "common",
+     "title": "团队资源排期",
+     "body": "核心专家（如架构师、算法骨干）通常同时承担多个项目。需要其介入的节点须提前1-2周沟通排期，而非临时拉人。"},
+    {"scope": "dept", "scope_ref": "", "confidence": "common",
+     "title": "团队分工与协作范式",
+     "body": "团队包括：领导组、售前、架构师、PM、产品设计与定义、感知、规划控制、基础软件开发、测试、传感器评价与管理、环境实施。"
+             "PM协调上述内部团队和外部总包/二级供应商，跨团队依赖需显式拉齐，不能假设默认对齐。"},
+    {"scope": "dept", "scope_ref": "", "confidence": "common",
+     "title": "硬件验证约束",
+     "body": "硬件验证必须在实验室物理环境下进行，不支持远程执行。需提前预约实验室资源和硬件到位时间。"},
+    {"scope": "dept", "scope_ref": "", "confidence": "assumed",
+     "title": "SW交付物提前冻结",
+     "body": "软件交付物（SW deliverables）通常需要先于OEM硬件集成窗口2周冻结，以留出集成准备和内部验证时间。具体节点以项目计划为准。"},
+    {"scope": "project", "scope_ref": "雅迪", "confidence": "common",
+     "title": "雅迪变更确认要求",
+     "body": "雅迪项目的所有范围变更需要三方书面确认：雅迪客户方 + 东软睿驰 + 总包（如有）。缺少任一方确认均视为未生效。"},
+    {"scope": "project", "scope_ref": "雅迪", "confidence": "common",
+     "title": "雅迪项目定位",
+     "body": "雅迪是当前主要OEM客户，属于定点后开发阶段。项目处于方案开发和集成验证周期内，对进度和质量敏感度高。"},
+]
+
+_ORG_SEEDS = {
+    "company": "东软睿驰",
+    "dept": "自动驾驶事业部",
+    "teams": ["领导组", "售前团队", "架构师团队", "PM团队", "产品设计与定义团队",
+              "感知团队", "规划控制团队", "基础软件开发团队", "测试团队",
+              "传感器评价与管理团队", "环境实施团队"],
+    "client": "雅迪",
+}
+
+
+def _seed_assumptions(conn):
+    if conn.execute("SELECT COUNT(*) FROM assumptions").fetchone()[0] > 0:
+        return
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for a in _ASSUMPTION_SEEDS:
+        conn.execute(
+            "INSERT INTO assumptions(scope,scope_ref,title,body,confidence,source,active,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (a["scope"], a["scope_ref"], a["title"], a["body"], a["confidence"], "seed", 1, now, now),
+        )
+
+
+def _seed_org_units(conn):
+    if conn.execute("SELECT COUNT(*) FROM org_units").fetchone()[0] > 0:
+        return
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("INSERT INTO org_units(type,name,parent_id,created_at) VALUES(?,?,NULL,?)",
+                 ("company", _ORG_SEEDS["company"], now))
+    company_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO org_units(type,name,parent_id,created_at) VALUES(?,?,?,?)",
+                 ("dept", _ORG_SEEDS["dept"], company_id, now))
+    dept_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    for team in _ORG_SEEDS["teams"]:
+        conn.execute("INSERT INTO org_units(type,name,parent_id,created_at) VALUES(?,?,?,?)",
+                     ("team", team, dept_id, now))
+    conn.execute("INSERT INTO org_units(type,name,parent_id,created_at) VALUES(?,?,NULL,?)",
+                 ("client_org", _ORG_SEEDS["client"], now))
 
 
 # ── 事件去重 ───────────────────────────────────────────────
