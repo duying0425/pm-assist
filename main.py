@@ -3459,6 +3459,7 @@ def _help_text(role: str = "unknown") -> str:
         "  /todo done/cancel [ID]   标记完成/取消\n"
         "  /review run              立即 AI 洗盘，报告和建议卡片发给所有管理员和PM\n"
         "  /review run report|direct  指定本次洗盘模式\n"
+        "  /status run              立即生成 AI 项目状态汇报，结果发给所有管理员和PM\n"
     )
 
     if role == "pm":
@@ -3491,5 +3492,6 @@ def _admin_help() -> str:
         "PM/管理员：/risk list/show/close/reopen/owner/add\n"
         "           /todo list/show/update/done/cancel/[内容]\n"
         "           /review run [report|direct]  立即洗盘\n"
+        "           /status run                  立即生成项目状态汇报\n"
         "           /note [内容]"
     )
