@@ -14,8 +14,8 @@
 ## 部署信息
 - 服务器：SSH 配置名 `aliyun`（本地 `~/.ssh/config` 中预设），用户 `duyingfang`，Ubuntu 24.04
 - 项目目录：`~/pm-assist`（虚拟环境在 `~/pm-assist/venv`）
-- 启动命令：`nohup venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 >> logs/app.log 2>&1 &`
-- 日志：`~/pm-assist/logs/app.log`
+- 服务管理：systemd 用户服务（`~/.config/systemd/user/pm-assist.service`），开机自启
+- 日志：`~/pm-assist/logs/app.log`（systemd 直接追加，无需 nohup 重定向）
 - 公网地址：`https://pm.tmhcorps.cn`（Cloudflare 代理 HTTP→HTTPS）
 - nginx 配置：`/etc/nginx/conf.d/apps.conf`（与 chat.tmhcorps.cn 共用）
 - 飞书 Webhook：`https://pm.tmhcorps.cn/webhook/feishu`
@@ -30,9 +30,11 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 用户有自建代理 `router.tmhcorps.cn`，config.py 中 `OPENROUTER_BASE_URL` 已配置。
 
 ## 服务管理规范
-用 nohup 运行，不用 systemd（账号无 NOPASSWD sudo）。
-- 重启：先 `ps aux | grep uvicorn` 找 PID，`kill PID`，再执行启动命令
-- 重启后需手动启动（无开机自动恢复）
+用**用户态 systemd**运行（`~/.config/systemd/user/pm-assist.service`），开机自启，崩溃自动恢复。
+- 重启：`systemctl --user restart pm-assist`
+- 状态：`systemctl --user status pm-assist`
+- 日志：`journalctl --user -u pm-assist -f`（或直接看 `logs/app.log`）
+- 部署新代码后：`scp` 上传文件，然后 `systemctl --user restart pm-assist`
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
@@ -43,7 +45,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 ## 开发工作流程
 1. 本地修改代码 + 更新 CLAUDE.md（版本号、功能描述、已知坑）
 2. `git commit`（本地提交）
-3. `scp` 推送到服务器，重启服务，飞书测试验证
+3. `scp` 推送到服务器，`systemctl --user restart pm-assist`，飞书测试验证
 4. 测试通过后 `git push` 推送到 GitHub
 
 ## 代码结构
@@ -57,16 +59,14 @@ pm-assist/
 ├── config.py        # 环境变量加载（从 .env 读取）
 ├── notify.py        # 消息推送：build_risk_section() + build_morning_report(review)
 ├── VERSION          # 版本号文件，格式 x.y.z
-├── migrate_v2.py    # 一次性迁移脚本（已执行，勿重复执行）
-├── seed.py          # 初始知识库数据（已执行，勿重复执行）
-├── seed_yadi.py     # 雅迪项目初始数据（已执行，勿重复执行）
 ├── static/
 │   └── admin.html   # Web 管理后台单页 UI（纯 HTML/CSS/JS，无外部依赖）
 ├── deploy/
 │   ├── nginx.conf        # nginx 站点配置模板
-│   ├── pm-assist.service # systemd 服务文件（备用，当前未启用）
+│   ├── pm-assist.service # systemd 用户服务文件（已部署到 ~/.config/systemd/user/）
 │   ├── setup.sh          # 一键部署脚本
 │   └── start.sh          # 启动脚本
+├── backups/         # DB 每日自动备份（03:00 执行，保留最近 7 份，服务器上）
 └── logs/app.log     # 运行日志（服务器上）
 ```
 
@@ -455,15 +455,16 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 ## 服务器当前状态
 - **当前版本：v1.0.0（已部署）**
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
-- migrate_v2.py / seed.py / seed_yadi.py 均已执行（勿重复运行）
-- `init_db()` 自动创建所有表、索引，并处理旧库升级（幂等），**无需手动迁移**
+- `init_db()` 自动创建所有表、索引、幂等执行种子数据，**无需手动迁移**（seed.py / seed_yadi.py / migrate_v2.py 均已内化删除）
 - 首次启动：自动创建 users/projects 表并种入「雅迪」项目；ADMIN_OPEN_IDS 用户首次发消息时自动注册为 super_admin
 - notify.py 的 crontab 条目已删除（早报改由 APScheduler 统一发送）
+- DB 每日 03:00 自动备份到 `~/pm-assist/backups/`，保留最近 7 份
+- 用户态 systemd 服务已启用（`pm-assist.service`），开机自启，崩溃自动恢复
 
 > 历史版本部署记录见 `CHANGELOG.md`
 
 ## 待开发
-- [ ] systemd 自动重启（当前重启服务器后需手动拉起）
+- [x] systemd 自动重启（用户态 systemd 服务，已实现）
 - [ ] Web 后台登录认证（当前无认证，内部工具暂可接受）
 - [ ] fact 正文重写：低质量描述生成结构化改写建议，建议走确认卡片，不直接自动覆盖
 - [ ] 多人协作卡片同步：同一批清洗建议任意一人处理后同步刷新其他人卡片状态（当前使用率不高，暂缓）
