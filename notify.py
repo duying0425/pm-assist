@@ -77,11 +77,11 @@ def get_morning_cards(review_text: str | None = None) -> dict[str | None, dict]:
     all_risks = db.list_risks(status="open")
     cards[None] = feishu.build_morning_report_card("", all_risks, review_text, today)
 
-    # 每个项目单独卡片（供 PM 接收）
+    # 每个项目单独卡片（供 PM 接收，也包含洗盘摘要）
     for proj in projects:
         name = proj["name"]
         proj_risks = db.list_risks(status="open", project=name)
-        cards[name] = feishu.build_morning_report_card(name, proj_risks, None, today)
+        cards[name] = feishu.build_morning_report_card(name, proj_risks, review_text, today)
 
     return cards
 

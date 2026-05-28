@@ -130,6 +130,7 @@ async def chat(history: list[dict], context: dict,
     response = await _client.chat.completions.create(
         model=AI_MODEL,
         max_tokens=8000,
+        timeout=90,
         messages=[{"role": "system", "content": system}] + history,
     )
     return response.choices[0].message.content
@@ -137,58 +138,45 @@ async def chat(history: list[dict], context: dict,
 
 
 
-_REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析以下项目信息库的所有 active facts，目标是从杂乱信息中提炼仍然有用的项目数据，不是简单挑错。
+_REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析以下项目信息库的所有 active facts，从杂乱信息中提炼仍然有用的项目状态，帮助 PM 掌握全局。
 
 分析原则：
-1. facts 是项目记忆库，不是聊天记录；判断哪些信息仍有用、哪些应合并、哪些应升级为风险或待办。
-2. 基础档案（人员/组织/客户/流程/知识）生命周期长，不因 30 天未更新就建议归档。
-3. 状态、里程碑、依赖、客户反馈——关注是否久未更新、缺 owner、缺下一步、是否暗含风险。
-4. risk/issue/blocker——关注超期、无负责人、长期无更新、是否可以关闭。
-5. decision——通常固化保存，只检查是否缺决策人/日期/影响范围，不轻易归档。
-
-[AUTO] 命令全局约束（以下规则优先于一切）：
-- 只允许两类：`/admin fact archive [ID]` 或 `/admin fact update [ID] owner|priority|due_date|status [值]`
-- title/body 改写、新增 risk/todo、合并操作——只给人工建议，绝不加 [AUTO]
-- [AUTO] 命令必须单独一行，行内不追加解释文字
+1. facts 是项目记忆库；判断哪些仍有用、哪些可合并、哪些暗含风险或需要跟进待办。
+2. 基础档案（人员/组织/客户/流程/知识）生命周期长，不因未更新就建议归档。
+3. 状态/里程碑/依赖/客户反馈——关注久未更新、缺 owner、缺下一步行动。
+4. risk/issue/blocker——关注超期、无负责人、长期无进展、是否可以关闭。
+5. decision——固化保存，只在明确缺失关键字段时提示。
 
 ---
-按以下结构输出（## 开头，共十节，每节都必须输出，没有内容时写"无"）：
+按以下结构输出（## 开头，共六节，每节都必须输出，没有内容时写"无"）：
 
-## 一、可归档信息
-只列明确重复、已完成且失效、或明显不再相关的条目。低风险的可加 [AUTO]：
-[AUTO] /admin fact archive 3
+## 一、建议归档或关闭
+逐条说明：条目ID、标题、归档/关闭原因。只列明确重复、已完成且失效、或明显不再相关的条目。
 
-## 二、可合并信息
-找出表达同一件事的多条条目，说明保留哪条、合并哪些内容。合并属高风险，只给人工建议，不加 [AUTO]。
+## 二、建议合并
+找出表达同一件事的多条条目，说明保留哪条（ID）、合入哪些（ID）、以及建议追加的补充内容。
 
-## 三、当前状态更新建议
-找出应补充"当前状态"的条目，给出人工确认命令（不加 [AUTO]）。
+## 三、状态与字段更新建议
+找出缺 owner、缺截止、描述严重过时的条目，逐条说明建议更新的内容（自然语言，不写命令）。
 
-## 四、风险候选
-从状态/里程碑/依赖/客户反馈中推导潜在风险。格式：来源 #ID、风险原因、建议标题、建议正文。
+## 四、潜在风险
+从状态/里程碑/依赖/客户反馈中推导出尚未记录为风险的隐患，说明来源 #ID、风险原因和建议跟进方向。
 
-## 五、待办建议
-从风险/状态缺口中提炼下一步行动，给出人工确认命令（不加 [AUTO]）。
+## 五、建议新增待办
+从风险/状态缺口中提炼下一步可执行行动，每条说明：行动内容、建议负责人、建议截止。
 
-## 六、描述质量改写建议
-找出描述口语化、缺背景/结论/下一步的条目，给出建议改写正文（不加 [AUTO]）。
-
-## 七、低风险字段补全
-只针对 owner/priority/due_date/status，非常确定时可加 [AUTO]：
-[AUTO] /admin fact update 8 owner 张三
-
-## 八、数据健康评分
-一句话评分：优 / 良 / 待改善，说明原因。
+## 六、数据健康总结
+2-3 句话：整体质量评估（优/良/待改善）、主要问题点、最需要 PM 关注的一件事。
 
 ---
-以下两节为机器可读区，无论有无内容都必须输出完整格式，空时用空数组 []：
+以下两节为机器可读区，供系统自动处理，无论有无内容都必须输出完整格式，空时用空数组 []：
 
-## 九、机器可读合并建议
+## 七、机器可读合并建议
 ===MERGE_CANDIDATES_JSON===
 {{"merge_candidates":[{{"keep_id":12,"merge_ids":[18,21],"reason":"描述同一件事，#12 信息更完整","append_text":"#18/#21 补充内容"}}]}}
 ===END_MERGE_CANDIDATES_JSON===
 
-## 十、机器可读风险/待办动作建议
+## 八、机器可读动作建议
 ===ACTION_CANDIDATES_JSON===
 {{"action_candidates":[{{"kind":"risk","id":12,"action":"close","reason":"风险已解决"}},{{"kind":"fact","id":18,"action":"archive","reason":"信息已过期"}},{{"kind":"todo","id":7,"action":"done","reason":"待办已完成"}},{{"kind":"todo","id":8,"action":"cancel","reason":"不再需要"}}]}}
 ===END_ACTION_CANDIDATES_JSON===

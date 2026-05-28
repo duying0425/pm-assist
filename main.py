@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -77,55 +78,38 @@ def _normalize_review_mode(value: str) -> str | None:
 
 def _apply_review_commands(report: str) -> list[str]:
     """Execute only explicit low-risk [AUTO] commands from the AI report."""
-    allowed_update = {"status", "owner", "priority", "due_date"}
     results: list[str] = []
-    seen: set[str] = set()
-    pattern = re.compile(r"/admin\s+fact\s+(archive|update)\s+(\d+)(?:\s+([a-zA-Z_]+)\s+(.+))?")
-    for line in report.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("[AUTO]"):
+    for item in _extract_action_candidates(report):
+        kind   = item.get("kind", "")
+        action = item.get("action", "")
+        fid    = item.get("id")
+        title  = item.get("title", f"#{fid}")
+        if not fid:
             continue
-        match = pattern.search(stripped)
-        if not match:
-            continue
-        raw_cmd = match.group(0).strip()
-        if raw_cmd in seen:
-            continue
-        seen.add(raw_cmd)
-
-        action, fid_s, field, value = match.groups()
-        fid = int(fid_s)
-        fact = db.get_fact(fid)
-        if not fact:
-            results.append(f"跳过：找不到 #{fid}（{raw_cmd}）")
-            continue
-
-        if action == "archive":
-            db.update_fact(fid, status="archived")
-            results.append(f"已归档 #{fid}：{fact['title']}")
-            continue
-
-        if not field or value is None:
-            results.append(f"跳过：update 命令缺少字段或值（{raw_cmd}）")
-            continue
-        field = field.lower()
-        if field not in allowed_update:
-            results.append(f"跳过：不允许更新字段 {field}（#{fid}）")
-            continue
-        value = value.strip().strip("`'\"，,。；;）)")
-        if field == "status":
-            value = {"open": "active", "closed": "resolved"}.get(value, value)
-            if value not in {"active", "resolved", "archived"}:
-                results.append(f"跳过：非法状态 {value}（#{fid}）")
+        if kind == "fact" and action == "archive":
+            fact = db.get_fact(fid)
+            if not fact:
+                results.append(f"跳过：找不到 fact #{fid}")
                 continue
-        if field == "priority" and value not in {"high", "medium", "low"}:
-            results.append(f"跳过：非法优先级 {value}（#{fid}）")
-            continue
-        db.update_fact(fid, **{field: value})
-        results.append(f"已更新 #{fid}.{field} = {value}")
-
+            db.update_fact(fid, status="archived")
+            results.append(f"已归档 #{fid}：{title}")
+        elif kind == "risk" and action == "close":
+            fact = db.get_fact(fid)
+            if not fact:
+                results.append(f"跳过：找不到 risk #{fid}")
+                continue
+            db.update_fact(fid, status="resolved")
+            results.append(f"已关闭风险 #{fid}：{title}")
+        elif kind == "todo" and action in ("done", "cancel"):
+            todo = db.get_todo(fid)
+            if not todo:
+                results.append(f"跳过：找不到 todo #{fid}")
+                continue
+            new_status = "done" if action == "done" else "cancelled"
+            db.update_todo(fid, status=new_status)
+            results.append(f"已{action} todo #{fid}：{title}")
     if not results:
-        results.append("未发现可执行的白名单命令，未修改数据。")
+        results.append("未发现可自动执行的动作。")
     return results
 
 
@@ -277,6 +261,7 @@ def _sanitize_ai_execution_claims(text: str, will_send_card: bool = False) -> st
 
 
 def _strip_merge_candidates_json(report: str) -> str:
+    # 剥除机器可读 JSON 块
     for start_marker, end_marker in (
         ("===MERGE_CANDIDATES_JSON===", "===END_MERGE_CANDIDATES_JSON==="),
         ("===ACTION_CANDIDATES_JSON===", "===END_ACTION_CANDIDATES_JSON==="),
@@ -285,7 +270,9 @@ def _strip_merge_candidates_json(report: str) -> str:
         end = report.find(end_marker)
         if start >= 0 and end > start:
             report = (report[:start] + report[end + len(end_marker):]).strip()
-    return report
+    # 剥除"机器可读"章节标题行（避免空标题残留）
+    report = re.sub(r"##\s+[一-十\d]+、?机器可读[^\n]*\n?", "", report)
+    return report.strip()
 
 
 async def _build_and_save_review(mode: str | None = None) -> str | None:
@@ -350,9 +337,7 @@ def _collect_review_suggestion_items(report: str) -> list[dict]:
 
 
 async def _send_review_suggestions_card(chat_id: str, report: str):
-    """将洗盘的合并+清洗建议合并为一张 AI 建议确认卡片发送。
-    chat_id 可能是群聊 ID 或个人 open_id（快捷菜单触发时）。
-    """
+    """将洗盘的合并+清洗建议合并为一张 AI 建议确认卡片发送给单个用户/群聊。"""
     if not chat_id:
         return
     items = _collect_review_suggestion_items(report)
@@ -367,10 +352,24 @@ async def _send_review_suggestions_card(chat_id: str, report: str):
     log.info("sent %d review suggestion items to %s", len(items), chat_id)
 
 
+async def _broadcast_review_suggestions(open_ids: set[str], report: str):
+    """向多个用户各自发送独立的洗盘建议确认卡片（每人一份 pending_commands）。"""
+    items = _collect_review_suggestion_items(report)
+    if not items:
+        return
+    for uid in open_ids:
+        if not uid:
+            continue
+        db.save_pending_commands(uid, items)
+        card = feishu.build_ai_suggestions_card(items, uid)
+        await feishu.send_reply_to_user(uid, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    log.info("broadcast %d review suggestion items to %d users", len(items), len(open_ids))
+
+
 async def _morning_review_and_report():
     """每天09:00：先执行AI洗盘，再发送风险日报 + 洗盘报告给所有收件人。
-    - 管理员/NOTIFY：发全项目综合卡片（含AI洗盘摘要）
-    - PM用户：发其所属项目的专属卡片（不含洗盘报告）
+    - 管理员/NOTIFY：发全项目综合卡片（含AI洗盘摘要）+ 建议确认卡片
+    - PM用户：发其所属项目的专属卡片（含AI洗盘摘要）+ 建议确认卡片
     注意：如果同时开了 crontab 跑 notify.py，主管理员会收到两次，二选一即可。
     """
     from config import NOTIFY_OPEN_IDS
@@ -378,7 +377,7 @@ async def _morning_review_and_report():
         report = await _build_and_save_review()
         review_text = _strip_merge_candidates_json(report) if report else None
 
-        # 按项目生成卡片
+        # 按项目生成卡片（PM 卡片也带洗盘摘要）
         project_cards = _notify.get_morning_cards(review_text)
 
         # 管理员 + NOTIFY 接全量卡片
@@ -388,18 +387,24 @@ async def _morning_review_and_report():
         for uid in admin_recipients:
             await feishu.send_reply_to_user(uid, project_cards[None], FEISHU_APP_ID, FEISHU_APP_SECRET)
 
-        # PM 用户：只收自己项目的卡片（且不重复发给已在 admin_recipients 的人）
+        # PM 用户：收自己项目的卡片（不重复发给已在 admin_recipients 的人）
+        pm_open_ids: set[str] = set()
         pm_users = db.list_users(role="pm", status="active")
         for user in pm_users:
             uid = user.get("open_id", "")
             proj = user.get("project", "")
             if not uid or uid in admin_recipients:
                 continue
+            pm_open_ids.add(uid)
             card = project_cards.get(proj, project_cards[None])
             await feishu.send_reply_to_user(uid, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
 
         log.info("morning report sent: %d admins/notify + %d PMs",
                  len(admin_recipients), len(pm_users))
+
+        # report_only：广播建议确认卡片；direct：action 已自动执行，不发卡片
+        if report and _get_review_mode() != _REVIEW_MODE_DIRECT:
+            await _broadcast_review_suggestions(ADMIN_OPEN_IDS | pm_open_ids, report)
     except Exception:
         log.exception("morning review and report error")
 
@@ -1372,16 +1377,36 @@ async def _handle_bot_menu(event: dict):
                     await send(_handle_admin_risk(["list", "open"], project=query_project))
             return
 
+        # PM + 管理员：查看早报
+        if event_key == "view_morning_report":
+            if user_role not in ("pm", "super_admin"):
+                await send("此功能仅限项目经理PM和管理员使用。")
+                return
+            review = db.get_latest_nightly_review()
+            review_text = _strip_merge_candidates_json(review) if review else None
+            today = datetime.now().strftime("%m月%d日")
+            query_project = project if user.get("project") else None
+            risks = db.list_risks(status="open", project=query_project)
+            card = feishu.build_morning_report_card(query_project or "", risks, review_text, today)
+            await send(card)
+            return
+
+        # PM + 管理员：AI 洗盘
+        if event_key == "run_review":
+            if user_role not in ("pm", "super_admin"):
+                await send("此功能仅限项目经理PM和管理员使用。")
+                return
+            await send("开始 AI 洗盘，完成后会发送报告。")
+            result = await _handle_review_run("/review run")
+            await send(result)
+            return
+
         # 管理员专用
         if user_role != "super_admin":
             await send("无权限：此操作仅限管理员使用。")
             return
 
-        if event_key == "run_review":
-            await send("开始 AI 洗盘，完成后会发送报告。")
-            report = await _handle_admin_review_run("/admin review run", chat_id=chat_id)
-            await send(report)
-        elif event_key == "admin_users":
+        if event_key == "admin_users":
             await send(_handle_admin("/admin user list", open_id, project, chat_id))
 
     except Exception:
@@ -1676,6 +1701,29 @@ async def _handle_message(event: dict):
         await feishu.send_reply(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
+    # ── PM / 管理员：AI 洗盘 ──
+    if text.startswith("/review"):
+        if user_role not in ("pm", "super_admin"):
+            await feishu.send_reply(chat_id, "此命令仅限项目经理PM和管理员使用。",
+                                   FEISHU_APP_ID, FEISHU_APP_SECRET)
+            return
+        parts = text.split()
+        sub = parts[1].lower() if len(parts) > 1 else ""
+        if sub == "run":
+            await feishu.send_reply(chat_id, "开始 AI 洗盘，完成后会发送报告。",
+                                   FEISHU_APP_ID, FEISHU_APP_SECRET)
+            reply = await _handle_review_run(text)
+        else:
+            reply = (
+                "洗盘命令：\n"
+                "/review run             立即洗盘，报告和建议卡片发送给所有管理员和 PM\n"
+                "/review run report      按仅报告模式执行一次\n"
+                "/review run direct      按直接清洗模式执行一次\n\n"
+                "（洗盘模式设置请联系管理员使用 /admin review mode）"
+            )
+        await feishu.send_reply(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return
+
     # ── PM / 管理员专用命令 ──
     if text.startswith("/note ") or text.startswith("/todo"):
         if user_role not in ("pm", "super_admin"):
@@ -1731,7 +1779,7 @@ async def _handle_message(event: dict):
         reply = await asyncio.wait_for(
             claude_client.chat(history, context,
                                sender_info=sender_info_str, role=user_role),
-            timeout=60.0,
+            timeout=90.0,
         )
     except asyncio.TimeoutError:
         reply = "AI 响应超时，请稍后重试。"
@@ -1902,7 +1950,7 @@ async def _clarify_and_respond(chat_id: str, sender_oid: str, user: dict,
         role = user.get("role", "pm")
         reply = await asyncio.wait_for(
             claude_client.chat(history, context, sender_info=sender_info, role=role),
-            timeout=60.0,
+            timeout=90.0,
         )
         reply = _strip_clarify(reply)
         reply = _sanitize_ai_execution_claims(reply)
@@ -2168,9 +2216,28 @@ def _strip_action_command_lines(text: str) -> str:
     return out or "我已整理出待处理建议，请在确认卡片中逐条处理。"
 
 
-async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
-    # text 形如 "/admin review run" 或 "/admin review run report"
-    mode_args = text.split()[3:]  # 跳过 /admin review run，取可选的模式参数
+async def _run_review_and_broadcast(mode: str | None = None) -> tuple[str | None, int, int]:
+    """执行洗盘并广播报告。
+    report_only：发报告文字 + 建议确认卡片；direct：自动执行 + 仅发报告文字。
+    返回 (report, merge_count, action_count)。
+    """
+    effective_mode = mode or _get_review_mode()
+    report = await _build_and_save_review(effective_mode)
+    if not report:
+        return None, 0, 0
+    await _send_review_to_admins_pm(_strip_merge_candidates_json(report))
+    review_items = _collect_review_suggestion_items(report)
+    merge_count  = sum(1 for x in review_items if x["kind"] == "merge_fact")
+    action_count = sum(1 for x in review_items if x["kind"] == "review_action")
+    if effective_mode != _REVIEW_MODE_DIRECT:
+        # report_only：全卡片确认，不自动执行
+        await _broadcast_review_suggestions(_review_recipients_admins_pm(), report)
+    return report, merge_count, action_count
+
+
+async def _handle_review_run(text: str) -> str:
+    """PM/管理员均可用：/review run [report|direct]"""
+    mode_args = text.split()[2:]  # 跳过 /review run
     mode = _get_review_mode()
     if mode_args:
         requested = _normalize_review_mode(mode_args[0])
@@ -2178,22 +2245,40 @@ async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
             return "模式只能是 report/仅报告 或 direct/直接清洗"
         mode = requested
 
-    report = await _build_and_save_review(mode)
+    report, merge_count, action_count = await _run_review_and_broadcast(mode)
     if not report:
         return "当前没有 active 项目信息条目，未生成洗盘报告。"
 
-    await _send_review_to_admins_pm(_strip_merge_candidates_json(report))
-    await _send_review_suggestions_card(chat_id, report)
-    review_items = _collect_review_suggestion_items(report)
-    merge_count  = sum(1 for x in review_items if x["kind"] == "merge_fact")
-    action_count = sum(1 for x in review_items if x["kind"] == "review_action")
     suffix_parts = []
     if merge_count:
         suffix_parts.append(f"{merge_count} 组合并建议")
     if action_count:
         suffix_parts.append(f"{action_count} 项清洗建议")
     suffix = f" 另发现 {'、'.join(suffix_parts)}，请在卡片中逐条确认。" if suffix_parts else ""
-    return f"✓ 已完成手动 AI 洗盘（{_review_mode_label(mode)}），报告已发送给管理员和 PM。{suffix}"
+    return f"✓ 已完成 AI 洗盘（{_review_mode_label(mode)}），报告和建议卡片已发送给所有管理员和 PM。{suffix}"
+
+
+async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
+    # text 形如 "/admin review run" 或 "/admin review run report"（保留兼容）
+    mode_args = text.split()[3:]  # 跳过 /admin review run
+    mode = _get_review_mode()
+    if mode_args:
+        requested = _normalize_review_mode(mode_args[0])
+        if not requested:
+            return "模式只能是 report/仅报告 或 direct/直接清洗"
+        mode = requested
+
+    report, merge_count, action_count = await _run_review_and_broadcast(mode)
+    if not report:
+        return "当前没有 active 项目信息条目，未生成洗盘报告。"
+
+    suffix_parts = []
+    if merge_count:
+        suffix_parts.append(f"{merge_count} 组合并建议")
+    if action_count:
+        suffix_parts.append(f"{action_count} 项清洗建议")
+    suffix = f" 另发现 {'、'.join(suffix_parts)}，请在卡片中逐条确认。" if suffix_parts else ""
+    return f"✓ 已完成手动 AI 洗盘（{_review_mode_label(mode)}），报告和建议卡片已发送给所有管理员和 PM。{suffix}"
 
 
 async def _handle_admin_user_approve_reject(text: str) -> str:
@@ -2946,6 +3031,8 @@ def _help_text(role: str = "unknown") -> str:
         "  /todo update [ID] [字段] [值]  更新字段\n"
         "    字段：title|body|priority|owner|due_date\n"
         "  /todo done/cancel [ID]   标记完成/取消\n"
+        "  /review run              立即 AI 洗盘，报告和建议卡片发给所有管理员和PM\n"
+        "  /review run report|direct  指定本次洗盘模式\n"
     )
 
     if role == "pm":
@@ -2958,7 +3045,7 @@ def _help_text(role: str = "unknown") -> str:
         "  /admin user list/show/role/project/approve/reject/remove\n"
         "  /admin project list/add/close/open/bind/unbind/bindings\n"
         "  /admin fact list/show/update/archive/delete/add/decompose\n"
-        "  /admin review status/mode/run\n"
+        "  /admin review status/mode  查看/设置洗盘模式（run 已移至 /review）\n"
         "  /admin assumption list/show/add/update/archive/delete\n"
         "  /admin org list/add\n"
     )
@@ -2972,10 +3059,11 @@ def _admin_help() -> str:
         "/admin user list/show/role/project/approve/reject/remove\n"
         "/admin project list/add/close/open/bind/unbind/bindings\n"
         "/admin fact list/show/update/archive/delete/add/decompose\n"
-        "/admin review status/mode/run [report|direct]\n"
+        "/admin review status/mode  查看/设置洗盘模式\n"
         "/admin assumption list/show/add/update/archive/delete\n"
         "/admin org list/add\n\n"
         "PM/管理员：/risk list/show/close/reopen/owner/add\n"
         "           /todo list/show/update/done/cancel/[内容]\n"
+        "           /review run [report|direct]  立即洗盘\n"
         "           /note [内容]"
     )

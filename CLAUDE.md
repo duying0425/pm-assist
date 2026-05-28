@@ -36,7 +36,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `0.9.0`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `1.0.0`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
 - 每次部署前修改 `VERSION`，本地 `git tag vX.Y.Z && git push --tags`，scp 时一并上传
 
@@ -239,10 +239,11 @@ key / value / updated_at
 **洗盘边界**：
 - 当前洗盘对象是 `facts` 表，不包含 `todos`、`assumptions`、`org_units`
 - `todos` 不是 fact；todo 可通过 `source_fact_id` 关联 risk/issue/blocker，但不会被当前洗盘直接处理
-- 洗盘目标已升级为“项目数据提炼”：从杂乱 facts 中识别有用状态、可归档信息、风险候选、待办建议和描述质量问题
-- 报告结构：可归档信息 / 可合并信息 / 当前状态更新建议 / 风险候选 / 待办建议 / 描述质量改写建议 / 低风险字段补全 / 数据健康评分
-- `direct_cleanup` 只执行带 `[AUTO]` 前缀的低风险白名单命令：`/admin fact archive [ID]` 和 `/admin fact update [ID] status|owner|priority|due_date [值]`
-- 不执行 AI 生成的 delete、新增 risk、新增 todo、合并、title/body 改写或其他非白名单命令；priority/status 会做合法值校验
+- 洗盘目标已升级为”项目数据提炼”：从杂乱 facts 中识别有用状态、可归档信息、风险候选、待办建议和描述质量问题
+- 报告结构（v1.0.0 起）：六节纯自然语言（建议归档/建议合并/状态更新/潜在风险/建议新增待办/数据健康总结）+ 两节机器可读 JSON（合并建议/动作建议），报告文字不含命令格式
+- `report_only` 模式：发送报告文字 + 弹出确认卡片（合并建议卡片/动作建议卡片），人工操作；不自动执行任何数据变更
+- `direct` 模式：从 `action_candidates` JSON 自动执行动作（close/archive/done/cancel），不发确认卡片
+- 合法动作：`(risk,close)`/`(fact,archive)`/`(todo,done)`/`(todo,cancel)`；不执行 delete、新增 risk/todo、title/body 改写；priority/status 做合法值校验
 - 正文改写、风险候选、待办建议属于高风险语义动作，只在报告里给人工确认建议，不自动保存
 - 合并建议通过机器可读 `merge_candidates` 解析后发送飞书确认卡片；点击合并后执行 `append_to_fact(keep_id, ...)` 并归档被合入条目，不硬删除
 - 风险/待办处理建议通过机器可读 `action_candidates` 解析后发送飞书确认卡片；点击后可关闭 risk、归档 fact、完成/取消 todo
@@ -285,8 +286,10 @@ key / value / updated_at
 | AI 信息提取确认卡片 | ✗ | ✗ | ✓ | ✓ |
 | 快捷菜单-里程碑 | ✗ | ✓ | ✓ | ✓ |
 | 快捷菜单-待办/风险 | ✗ | ✗ | ✓ | ✓ |
+| /review run（洗盘执行） | ✗ | ✗ | ✓ | ✓ |
+| 快捷菜单-洗盘/查看早报 | ✗ | ✗ | ✓ | ✓ |
 | /admin 系列 | ✗ | ✗ | ✗ | ✓ |
-| 快捷菜单-洗盘/用户 | ✗ | ✗ | ✗ | ✓ |
+| 快捷菜单-用户列表 | ✗ | ✗ | ✗ | ✓ |
 
 **AI 上下文差异**（`claude_client.py`）：
 - `member`：仅注入角色定义 + 部门假设 + 里程碑/相关方（无 todos/risks/decisions）
@@ -344,7 +347,7 @@ key / value / updated_at
 18. **版本管理**：`VERSION` 文件 + `/version` 命令
 19. **注册与权限系统**：用户自主注册、管理员审批、三角色差异化 AI 上下文、说话人身份注入（v0.6.0）
 20. **飞书 post 富文本消息支持**：同时处理 `text` 和 `post` 两种消息类型，解析 at/text/a 节点，剔除 @Bot 节点后正常进入对话流程；段落间保留 `\n` 换行，编号列表等排版结构完整传给 AI（v0.6.1）
-21. **"思考中"占位消息**：AI 处理期间先发占位消息，回复就绪后原地 PATCH 更新，避免消息跳动；加 60 秒超时兜底（v0.6.3）
+21. **"思考中"占位消息**：AI 处理期间先发占位消息，回复就绪后原地 PATCH 更新，避免消息跳动；90 秒超时兜底（v0.6.3，超时时间 v1.0.0 由 60s 升至 90s）
 22. **AI 纯文本输出**：系统提示约束 AI 不输出 Markdown 符号；`feishu._strip_md()` 二次兜底剥除残留格式（v0.6.3）
 23. **待办意图自动提取**：用户对话中明确说"加个待办/提醒"时，AI 自动识别并弹出确认卡片，支持逐条或全部新增（v0.6.3）
 24. **`/admin fact decompose` 卡片确认**：AI 分解 risk 后不再直接写库，改为弹出待办确认卡片，用户可按需选择保存（v0.6.3）
@@ -376,6 +379,10 @@ key / value / updated_at
 50. **管理员项目绑定与全量 AI 上下文**：`/join [项目名]` 对管理员直接生效（无需审批）；管理员无项目绑定时 `_resolve_project` 返回 `None`，`get_full_context(None)` 查全量（所有项目的 facts/todos 均注入，带项目标注）；`_sender_info` 显示管理员当前关注项目；AI 上下文新增"系统注册用户"章节（`db.get_users_summary()`），AI 可回答"谁在哪个项目、什么角色"（v0.8.2）
 51. **AI 建议整合到主回复**：取消独立 `extract_facts` / `extract_todo_intent` 额外 AI 调用；AI 在主回复末尾内嵌 `===SUGGESTIONS=== JSON ===END_SUGGESTIONS===` 块，主流程解析后弹出统一建议确认卡片（v0.9.0）
 52. **统一 AI 建议确认卡片**：`build_ai_suggestions_card` 按类型分组（风险/里程碑/知识/待办/更新建议），每项附"详情"按钮；`build_suggestion_detail_card` 展示完整信息 + 保存/跳过/返回操作；支持全部保存、全部跳过、全部处理完时显示汇总；`/admin fact decompose` 生成的待办也改走此卡片（v0.9.0）
+53. **修复定时早报建议卡片缺失**：`_morning_review_and_report` 发完早报后调用 `_broadcast_review_suggestions`，与手动 `/review run` 行为一致（v0.9.8）
+54. **洗盘下放 PM 层级**：`/review run` PM 和管理员均可用，广播报告+建议卡片给所有管理员和 PM；早报 PM 卡片加入完整洗盘报告；新增 `_broadcast_review_suggestions` 多人广播；快捷菜单 `run_review` 开放给 PM（v0.9.9）
+55. **洗盘报告优化与模式分离**：提示词改为六节纯自然语言+两节机器可读 JSON（去掉命令格式）；`report_only` = 发卡片由人工确认，`direct` = 自动执行 `action_candidates` JSON 中的动作不发卡片；早报卡片洗盘内容去掉 800 字截断显示完整报告；AI 对话超时从 60s 升至 90s（v1.0.0）
+56. **`view_morning_report` 快捷菜单**：PM 和管理员均可用；查看最新早报（当前风险+最近洗盘报告），不触发 AI 调用，读 DB 缓存即时返回（v1.0.0）
 
 ## 命令速查
 
@@ -402,6 +409,11 @@ key / value / updated_at
 ### PM / 管理员可用
 ```
 /note [内容]   快速记录笔记到知识库
+
+# AI 洗盘（PM 和管理员均可）
+/review run                      按当前模式立即洗盘，发送给所有管理员和 PM
+/review run report               临时按仅报告模式执行一次（弹卡片）
+/review run direct               临时按直接执行模式执行一次（自动清洗）
 
 # 风险管理
 /risk list [open|all]
@@ -462,13 +474,11 @@ key / value / updated_at
 /admin project unbind                解除当前群聊绑定
 /admin project bindings              查看所有群聊绑定
 
-# AI 洗盘
+# AI 洗盘（模式配置，管理员专用）
 /admin review status                   查看当前洗盘模式
-/admin review mode report              设置为仅报告（默认，不改数据）
-/admin review mode direct              设置为直接清洗（执行白名单命令）
-/admin review run                      按当前模式立即洗盘，发送给管理员和 PM
-/admin review run report               临时按仅报告模式执行一次
-/admin review run direct               临时按直接清洗模式执行一次
+/admin review mode report              设置为仅报告（默认，弹卡片由人确认）
+/admin review mode direct              设置为直接执行（从 action_candidates JSON 自动清洗）
+# 注：/review run 执行洗盘，PM 和管理员均可用（见 PM/管理员可用命令）
 
 # 预设假设管理（部门公认背景知识）
 /admin assumption list [dept|project|client]
@@ -518,7 +528,8 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 | `view_schedule` | 查看里程碑 | member / pm / super_admin | 列出当前项目 active 里程碑 |
 | `view_todos` | 查看待办 | pm / super_admin | 列出进行中待办（按项目过滤） |
 | `view_risks` | 查看风险 | pm / super_admin | 列出 open 风险/问题（按项目过滤） |
-| `run_review` | AI 洗盘 | super_admin | 立即执行洗盘（按当前模式），完成后推送报告 |
+| `run_review` | AI 洗盘 | pm / super_admin | 立即执行洗盘（按当前模式），完成后推送报告+建议卡片 |
+| `view_morning_report` | 查看早报 | pm / super_admin | 查看最新早报（当前风险+最近洗盘报告，读 DB 缓存，不触发 AI） |
 | `admin_users` | 用户列表 | super_admin | 列出所有注册用户 |
 
 > 注意：快捷菜单事件无 chat_id，`view_*` 使用发起人的 open_id 作为 chat_id，项目按用户绑定解析（super_admin 无项目绑定时查全量）。
@@ -710,8 +721,8 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 **内容**:
 - 无风险时: "✅ 当前无待处理风险/问题"
 - 有风险时: 按 高/中/低 分组列出，格式 `#{id} [类型] 标题（负责人）⏰截止`，末尾显示总数
-- 可选 AI 洗盘摘要（≤800字，超出截断提示"完整报告已存入系统"）
-**发送场景**: APScheduler 09:00 自动触发 / `/admin review run` 手动触发
+- 可选 AI 洗盘报告（完整显示，无截断；v1.0.0 起 PM 卡片也包含完整报告）
+**发送场景**: APScheduler 09:00 自动触发 / `/review run` 手动触发
 **按项目分发**: 全项目综合卡片→管理员+NOTIFY_OPEN_IDS；各项目单独卡片→对应 PM（不重复发给管理员）
 **无交互按钮**（纯展示）
 
@@ -755,7 +766,7 @@ _SUGGESTION_SECTIONS = [("risk_fact","⚠️ 风险/问题"),("schedule_fact","�
 - `aliyun.tmhcorps.cn` DNS 须设为"仅DNS"（灰云），否则 SSH 被 Cloudflare 拦截
 - 飞书卡片回调响应 body 必须包含 `card.type="raw"` 和 `data` 包装层
 - APScheduler 的定时任务在服务重启后重新注册，若服务在 09:00 后重启，当天洗盘+早报会跳过（次日才补跑）
-- AI 洗盘 `direct_cleanup` 只执行报告中带 `[AUTO]` 前缀的低风险 facts 命令；请先用 `/admin review run report` 观察建议质量；目前不会直接清洗 todos
+- AI 洗盘 `direct` 模式从 `action_candidates` JSON 执行动作（close/archive/done/cancel），不发确认卡片；请先用 `/review run report` 观察建议质量再切换到 direct；`report_only` 模式弹卡片由人确认，为默认推荐模式
 - Web 后台概览页可切换洗盘模式，但没有单独登录认证，仍按内部工具处理
 - 飞书更新卡片消息：必须用 `PATCH /im/v1/messages/{id}`（不带 `/body`），`/body` 子路径只支持 text/post，不支持 interactive；schema 2.0 卡片更新时 config 中须加 `"update_multi": true`
 
@@ -773,6 +784,9 @@ _SUGGESTION_SECTIONS = [("risk_fact","⚠️ 风险/问题"),("schedule_fact","�
 - v0.9.1 本地完成（洗盘卡片修复+优化：合并/清洗建议统一进入 AI 建议卡片；修复快捷菜单触发时 open_id 当 chat_id 发送失败的 bug；洗盘报告章节标题改用 ## Markdown 格式）
 - v0.9.4 本地完成（system prompt 修复：移除"系统会自动弹出确认卡片"误导语、禁止 AI 编造第N次计次、明确有无 SUGGESTIONS 块的区别；/clear 改用 _clear_all_pending_confirmations 彻底清除所有 pending 类型）
 - v0.9.6 本地完成（提示词系统优化：对话 _ROLE 新增"不应生成建议块"负面列表、删除"AI整理行动项即触发"噪声条件、修正 update_fact 字段说明和 JSON 示例；洗盘 _REVIEW_PROMPT_TPL 集中 [AUTO] 约束至全局、机器可读区强制输出要求、修复 retry prompt "一到八节"→"十节" bug）
+- v0.9.8 已部署（修复定时早报不发建议卡片：_morning_review_and_report 发完早报后调用 _broadcast_review_suggestions，与手动 /review run 行为一致）
+- v0.9.9 已部署（洗盘下放 PM 层级：/review run 命令 PM 和管理员均可用，广播报告+建议卡片给所有管理员和 PM；早报 PM 卡片加入完整洗盘报告；新增 _broadcast_review_suggestions 多人广播；/admin review status/mode 保留管理员专用；快捷菜单 run_review 开放给 PM）
+- v1.0.0 已部署（洗盘报告优化：提示词改为六节纯自然语言+两节机器可读 JSON，去掉命令格式；direct 模式从 action_candidates JSON 执行（不再依赖 [AUTO] 前缀）；report_only 模式弹卡片由人确认；早报卡片洗盘内容完整显示无截断；新增 view_morning_report 快捷菜单（PM+管理员）查看最新早报；AI 对话 API 超时升至 90s；asyncio.wait_for 超时升至 90s）
 - **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（无需登录，内部工具）
 - migrate_v2.py 已执行（DB已迁移，勿重复运行）

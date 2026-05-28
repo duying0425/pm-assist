@@ -1187,8 +1187,7 @@ def build_morning_report_card(project_name: str, risks: list,
 
     if review_text:
         elements.append({"tag": "hr"})
-        summary = review_text[:800] + "…（完整报告已存入系统）" if len(review_text) > 800 else review_text
-        elements.append(_md(f"**🤖 AI洗盘摘要**\n{summary}"))
+        elements.append(_md(f"**🤖 AI洗盘报告**\n{review_text}"))
 
     header_title = f"📋 {today} {project_name}早报" if project_name else f"📋 {today} 综合早报"
     return _card(elements, header=_header(header_title, "blue"), forward=False)
