@@ -276,6 +276,7 @@ const SCOPE_S = {global:['#ede9fe','#5b21b6'],dept:['#dbeafe','#1e40af'],project
 
 // ── State ─────────────────────────────────────────────────
 let projects=[], lastFacts=[], lastTodos=[], lastUsers=[], lastAssumptions=[], modalCb=null;
+let currentTab='stats', _noPush=false;
 
 // ── API ───────────────────────────────────────────────────
 async function api(method,path,data){
@@ -308,18 +309,20 @@ function updateProjSelects(){
 }
 
 // ── Tabs ──────────────────────────────────────────────────
-function showTab(name){
+async function showTab(name, push=true){
+  currentTab=name;
   document.querySelectorAll('.tab-content').forEach(el=>el.style.display='none');
   document.querySelectorAll('.tab-btn').forEach(el=>el.classList.remove('active'));
   document.getElementById('tab-'+name).style.display='';
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
   stopAutoRefresh();
-  if(name==='stats')loadStats();
-  else if(name==='facts')loadFacts();
-  else if(name==='todos')loadTodos();
-  else if(name==='users')loadUsers();
-  else if(name==='assumptions')loadAssumptions();
-  else if(name==='logs')loadLogs();
+  if(push) history.pushState({tab:name}, '', '?tab='+name);
+  if(name==='stats') await loadStats();
+  else if(name==='facts') await loadFacts();
+  else if(name==='todos') await loadTodos();
+  else if(name==='users') await loadUsers();
+  else if(name==='assumptions') await loadAssumptions();
+  else if(name==='logs') await loadLogs();
 }
 
 // ── Stats ─────────────────────────────────────────────────
@@ -375,6 +378,7 @@ function openAddFact(){
 }
 function editFact(id){
   const f=lastFacts.find(x=>x.id===id);if(!f)return;
+  if(!_noPush) history.pushState({tab:'facts',edit:id}, '', `?tab=facts&edit=${id}`);
   openModal('编辑条目 #'+id,factForm(f),async()=>{await api('PATCH',`/facts/${id}`,collectFact());loadFacts();});
 }
 async function archiveFact(id){if(!confirm('确认归档此条目？'))return;await api('DELETE',`/facts/${id}`);loadFacts();}
@@ -419,6 +423,7 @@ function openAddTodo(){
 }
 function editTodo(id){
   const t=lastTodos.find(x=>x.id===id);if(!t)return;
+  if(!_noPush) history.pushState({tab:'todos',edit:id}, '', `?tab=todos&edit=${id}`);
   openModal('编辑待办 #T'+id,todoForm(t),async()=>{await api('PATCH',`/todos/${id}`,collectTodo());loadTodos();});
 }
 async function doneTodo(id){await api('PATCH',`/todos/${id}`,{status:'done'});loadTodos();}
@@ -485,7 +490,7 @@ async function loadAssumptions(){
   </tr>`).join('');
 }
 function openAddAssumption(){openModal('新增预设假设',assumptionForm(),async()=>{await api('POST','/assumptions',collectAssumption());loadAssumptions();});}
-function editAssumption(id){const a=lastAssumptions.find(x=>x.id===id);if(!a)return;openModal('编辑预设 #'+id,assumptionForm(a),async()=>{await api('PATCH',`/assumptions/${id}`,collectAssumption());loadAssumptions();});}
+function editAssumption(id){const a=lastAssumptions.find(x=>x.id===id);if(!a)return;if(!_noPush)history.pushState({tab:'assumptions',edit:id},'',`?tab=assumptions&edit=${id}`);openModal('编辑预设 #'+id,assumptionForm(a),async()=>{await api('PATCH',`/assumptions/${id}`,collectAssumption());loadAssumptions();});}
 async function archiveAssumption(id){if(!confirm('确认归档此预设？'))return;await api('DELETE',`/assumptions/${id}`);loadAssumptions();}
 function assumptionForm(a={}){return`
   <div class="form-row">
@@ -505,7 +510,12 @@ function openModal(title,html,cb){
   document.getElementById('modal-overlay').classList.add('open');
   setTimeout(()=>document.querySelector('#modal-body input,#modal-body select')?.focus(),80);
 }
-function closeModal(){document.getElementById('modal-overlay').classList.remove('open');modalCb=null;}
+function closeModal(){
+  document.getElementById('modal-overlay').classList.remove('open');
+  modalCb=null;
+  if(!_noPush && new URLSearchParams(location.search).get('edit'))
+    history.pushState({tab:currentTab}, '', '?tab='+currentTab);
+}
 function closeModalBg(e){if(e.target===document.getElementById('modal-overlay'))closeModal();}
 async function submitModal(){
   if(!modalCb)return;
@@ -550,28 +560,41 @@ function stopAutoRefresh(){
   if(cb)cb.checked=false;
 }
 
+// ── Popstate（浏览器前进/后退）─────────────────────────────
+window.addEventListener('popstate', async () => {
+  const p=new URLSearchParams(location.search);
+  const tab=p.get('tab')||'stats';
+  const editId=parseInt(p.get('edit')||'0');
+  document.getElementById('modal-overlay').classList.remove('open');
+  modalCb=null;
+  _noPush=true;
+  await showTab(tab, false);
+  if(editId){
+    if(tab==='facts') editFact(editId);
+    else if(tab==='todos') editTodo(editId);
+    else if(tab==='assumptions') editAssumption(editId);
+  }
+  _noPush=false;
+});
+
 // ── Init ──────────────────────────────────────────────────
 async function init(){
   const me=await api('GET','/me');
   document.getElementById('header-user').textContent=`${me.name}（${me.role==='super_admin'?'管理员':'PM'}）`;
-  const params=new URLSearchParams(window.location.search);
-  const tab=params.get('tab');
-  const editId=parseInt(params.get('edit')||'0');
-  if(tab&&editId){
-    // 切换 tab（不触发 loadStats，直接切页面）
-    document.querySelectorAll('.tab-content').forEach(el=>el.style.display='none');
-    document.querySelectorAll('.tab-btn').forEach(el=>el.classList.remove('active'));
-    document.getElementById('tab-'+tab)?.style.setProperty('display','');
-    document.querySelector(`[data-tab="${tab}"]`)?.classList.add('active');
-    // 先加载项目列表（表单下拉依赖）
-    projects=await api('GET','/projects');
-    updateProjSelects();
-    if(tab==='facts'){await loadFacts();editFact(editId);}
-    else if(tab==='todos'){await loadTodos();editTodo(editId);}
-    else loadStats();
-  }else{
-    loadStats();
+  const p=new URLSearchParams(window.location.search);
+  const tab=p.get('tab')||'stats';
+  const editId=parseInt(p.get('edit')||'0');
+  // 非 stats tab 需先加载项目列表供表单下拉使用
+  if(editId && tab!=='stats'){projects=await api('GET','/projects');updateProjSelects();}
+  _noPush=true;
+  await showTab(tab, false);
+  history.replaceState({tab, edit:editId||undefined}, '', editId?`?tab=${tab}&edit=${editId}`:`?tab=${tab}`);
+  if(editId){
+    if(tab==='facts') editFact(editId);
+    else if(tab==='todos') editTodo(editId);
+    else if(tab==='assumptions') editAssumption(editId);
   }
+  _noPush=false;
 }
 init();
 </script>
