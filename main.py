@@ -1315,6 +1315,46 @@ async def _handle_card_trigger(event: dict) -> dict:
             log.info("rejected user %s name=%s", open_id, name)
             return feishu.card_rejected_response(name)
 
+        # ── 创建项目审批 ──
+        if action == "approve_project":
+            open_id     = value.get("open_id", "")
+            name        = value.get("name", "")
+            proj_name   = value.get("proj_name", "")
+            description = value.get("description", "")
+            existing_proj = db.get_project_by_name(proj_name)
+            if existing_proj:
+                return {
+                    "toast": {"type": "info", "content": f"项目「{proj_name}」已存在"},
+                    "card": {"type": "raw", "data": {
+                        "schema": "2.0",
+                        "config": {"enable_forward": False},
+                        "body": {"elements": [{"tag": "markdown",
+                                               "content": f"⚠️ 项目「{proj_name}」已存在（可能已由其他管理员批准）"}]},
+                    }},
+                }
+            db.add_project(proj_name, description, created_by=open_id)
+            db.update_user(open_id, project=proj_name)
+            await feishu.send_reply_to_user(
+                open_id,
+                f"🎉 你的项目创建申请已通过！\n项目：{proj_name}\n\n"
+                f"你已绑定到该项目，发 /help 查看可用命令。",
+                FEISHU_APP_ID, FEISHU_APP_SECRET,
+            )
+            log.info("approved project %s by %s name=%s", proj_name, open_id, name)
+            return feishu.card_project_approved_response(name, proj_name)
+
+        if action == "reject_project":
+            open_id   = value.get("open_id", "")
+            name      = value.get("name", "")
+            proj_name = value.get("proj_name", "")
+            await feishu.send_reply_to_user(
+                open_id,
+                f"很抱歉，你申请创建的项目「{proj_name}」已被拒绝。如有疑问请联系管理员。",
+                FEISHU_APP_ID, FEISHU_APP_SECRET,
+            )
+            log.info("rejected project %s by %s name=%s", proj_name, open_id, name)
+            return feishu.card_project_rejected_response(name, proj_name)
+
         # ── 合并确认卡片 ──
         if action == "merge_one":
             return _card_merge_one(value, chat_id)
@@ -2014,7 +2054,8 @@ def _register_text() -> str:
         "3. 批准后即可使用完整功能\n\n"
         "角色说明：\n"
         "- pm：项目经理，可使用完整PM工作功能（风险管理、待办、AI辅助等）\n"
-        "- member：普通成员，可与AI对话咨询团队/项目问题"
+        "- member：普通成员，可与AI对话咨询团队/项目问题\n\n"
+        "💡 如果需要的项目不在列表中，可直接发送 /join [新项目名] pm 申请创建，管理员审批后自动创建并绑定。"
     )
 
 
@@ -2029,17 +2070,30 @@ async def _handle_join(text: str, sender_open_id: str, user: dict) -> str:
     if role_req not in ("pm", "member"):
         return "角色只能是 pm 或 member\n例：/join 雅迪 pm"
 
-    # 验证项目存在
+    # 验证项目是否存在
     project = db.get_project_by_name(project_name)
-    if not project or not project.get("active"):
-        projects = db.list_projects(active_only=True)
-        names = "、".join(p["name"] for p in projects) if projects else "（暂无）"
-        return f"找不到项目「{project_name}」。\n当前可用项目：{names}\n\n发 /start 查看详情。"
+    project_exists = bool(project and project.get("active"))
 
-    # 已是 super_admin：直接绑定项目，无需审批
+    if not project_exists:
+        # member 角色：不允许申请创建项目
+        if role_req == "member":
+            projects = db.list_projects(active_only=True)
+            names = "、".join(p["name"] for p in projects) if projects else "（暂无）"
+            return (f"找不到项目「{project_name}」。\n当前可用项目：{names}\n\n"
+                    "发 /start 查看详情；如需创建新项目请以 pm 角色申请：\n"
+                    f"/join {project_name} pm")
+
+    # 已是 super_admin：直接绑定项目（或创建后绑定），无需审批
     if user.get("role") == "super_admin":
+        if not project_exists:
+            try:
+                db.add_project(project_name, created_by=sender_open_id)
+            except Exception:
+                return f"创建项目「{project_name}」失败（可能已存在），请检查后重试。"
         db.update_user(sender_open_id, project=project_name)
-        return f"✓ 已将你的项目绑定改为「{project_name}」，之后的 AI 对话将使用该项目上下文。\n（管理员可随时用 /join [项目名] 切换项目，或 /admin user project [open_id] - 清除绑定）"
+        hint = "（项目不存在，已自动创建）" if not project_exists else ""
+        return (f"✓ 已将你的项目绑定改为「{project_name}」{hint}，之后的 AI 对话将使用该项目上下文。\n"
+                "（管理员可随时用 /join [项目名] 切换项目，或 /admin user project [open_id] - 清除绑定）")
 
     # 已经是 active 用户
     if user.get("status") == "active" and user.get("project"):
@@ -2058,7 +2112,20 @@ async def _handle_join(text: str, sender_open_id: str, user: dict) -> str:
     if not name:
         name = sender_open_id[:8]
 
-    # 写入 pending 状态
+    if not project_exists:
+        # pm 角色申请创建新项目：发创建审批卡片，暂不写 pending 用户状态
+        try:
+            card = feishu.build_project_request_card(sender_open_id, name, project_name, "")
+            for admin_id in ADMIN_OPEN_IDS:
+                await feishu.send_card_to_user(admin_id, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+            log.info("project request sent to %d admins: proj=%s by %s",
+                     len(ADMIN_OPEN_IDS), project_name, sender_open_id)
+        except Exception:
+            log.exception("failed to send project approval card")
+        return (f"✅ 项目「{project_name}」尚不存在，已提交创建申请！\n\n"
+                "管理员审批后，项目将自动创建并绑定到你的账号，届时会收到通知。")
+
+    # 写入 pending 状态（加入已有项目的普通审批流程）
     db.upsert_user(sender_open_id, name=name, role=role_req,
                    project=project_name, status="pending")
 

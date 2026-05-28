@@ -344,6 +344,58 @@ def card_rejected_response(name: str) -> dict:
                  [_md(f"❌ 已拒绝 **{name}** 的申请")])
 
 
+# ── 创建项目审批卡片 ────────────────────────────────────────────
+
+def build_project_request_card(open_id: str, name: str, proj_name: str, description: str) -> dict:
+    """构建新建项目审批卡片（发给管理员）。"""
+    elements = [
+        {
+            "tag": "div",
+            "fields": [
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**申请人**\n{name}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**项目名称**\n{proj_name}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**项目描述**\n{description or '（无）'}"}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": f"**open_id**\n{open_id}"}},
+            ],
+        },
+        {"tag": "hr"},
+        _button_row([
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "✅ 批准创建"},
+                "type": "primary",
+                "value": {
+                    "action": "approve_project",
+                    "open_id": open_id,
+                    "name": name,
+                    "proj_name": proj_name,
+                    "description": description,
+                },
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "❌ 拒绝"},
+                "type": "danger",
+                "value": {
+                    "action": "reject_project",
+                    "open_id": open_id,
+                    "name": name,
+                    "proj_name": proj_name,
+                },
+            },
+        ]),
+    ]
+    return _card(elements, header=_header("🆕 新建项目申请", "wathet"), wide=False, forward=False)
+
+
+def card_project_approved_response(name: str, proj_name: str) -> dict:
+    return _resp("success", f"已批准创建「{proj_name}」",
+                 [_md(f"✅ 已批准 **{name}** 创建项目「{proj_name}」")])
+
+
+def card_project_rejected_response(name: str, proj_name: str) -> dict:
+    return _resp("info", f"已拒绝「{proj_name}」",
+                 [_md(f"❌ 已拒绝 **{name}** 的项目创建申请「{proj_name}」")])
 
 
 # ── Merge 确认卡片 ─────────────────────────────────────────────
