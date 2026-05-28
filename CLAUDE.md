@@ -461,7 +461,8 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - **scp 注意**：本地路径必须用正斜杠 `/c/Users/...`，反斜杠在 bash 中会导致 scp 静默失败
 - AI 洗盘 `direct` 模式自动执行，请先用 `/review run report` 观察建议质量再切换；`report_only` 为默认推荐模式
 - 飞书 `mentions` 字段中**没有 `is_bot` 属性**；判断 Bot 是否被 @需对比 Bot 自身 open_id（启动时由 `/bot/v3/info` 拉取，存于全局 `BOT_OPEN_ID`）
-- Web 后台飞书 OAuth：code 换 token 用 `POST /authen/v1/access_token` 请求体直接带 `app_id + app_secret + code`，无需先拿 app_access_token；`SESSION_SECRET` 未配置时每次重启生成新密钥（重启后需重新登录），生产建议固定配置
+- Web 后台飞书 OAuth：`/authen/v1/access_token` 不支持请求体带 `app_id+app_secret+code`（飞书文档有误）；必须先 POST `/auth/v3/app_access_token/internal` 拿 `app_access_token`，再用 `Authorization: Bearer {app_access_token}` + body `{grant_type, code}` 换用户信息
+- Web 后台飞书 OAuth：`SESSION_SECRET` 未配置时每次重启生成新密钥（重启后需重新登录），生产建议在 `.env` 固定配置
 
 ## 服务器当前状态
 - **当前版本：v1.0.2（已部署）**

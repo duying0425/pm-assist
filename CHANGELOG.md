@@ -20,6 +20,8 @@
 | v0.9.8 | 已部署 | 修复定时早报不发建议卡片：_morning_review_and_report 发完早报后调用 _broadcast_review_suggestions |
 | v0.9.9 | 已部署 | 洗盘下放 PM 层级：/review run PM 和管理员均可用；早报 PM 卡片加入完整洗盘报告；新增 _broadcast_review_suggestions 多人广播 |
 | v1.0.0 | 已部署 | 洗盘报告优化：六节纯自然语言+两节机器可读 JSON；direct 模式从 action_candidates JSON 执行；新增 view_morning_report 快捷菜单；AI 对话超时升至 90s |
+| v1.0.1 | 已部署 | 里程碑列表详情按钮；风险/待办/里程碑详情卡片加后台编辑链接；admin_users 人员信息卡片按角色分级展示；/admin stats 加会话统计；修复群聊 @Bot 不响应问题 |
+| v1.0.2 | 已部署 | Web 后台飞书 OAuth 认证（super_admin / pm 可访问）；DB 表补充 chat_bindings / user_chat_ids；会话统计 API |
 
 ## 已实现功能清单
 
