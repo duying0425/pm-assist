@@ -16,7 +16,6 @@ from fastapi.responses import JSONResponse
 import ai_client
 import db
 import feishu
-import notify as _notify
 from web_admin import router as admin_router
 from config import (
     ADMIN_OPEN_IDS,
@@ -451,16 +450,31 @@ async def _morning_review_and_report():
             if uid and proj:
                 pm_by_project.setdefault(proj, set()).add(uid)
 
-        # 按项目逐一洗盘并保存
-        review_by_project: dict[str, str | None] = {}  # stripped text，供早报卡片使用
-        full_reports: dict[str, str | None] = {}        # 含 JSON 候选，供建议卡片使用
+        # 按项目逐一生成状态汇报 + 洗盘，并保存
+        status_by_project: dict[str, str | None] = {}   # AI 状态汇报文本
+        review_by_project: dict[str, str | None] = {}   # stripped 洗盘文本，供早报卡片使用
+        full_reports: dict[str, str | None] = {}         # 含 JSON 候选，供建议卡片使用
         for proj in db.list_projects(active_only=True):
             name = proj["name"]
             full_report = await _build_and_save_review(effective_mode, name)
             full_reports[name] = full_report
             review_by_project[name] = _strip_merge_candidates_json(full_report) if full_report else None
+            try:
+                status_text = await ai_client.generate_project_status(name)
+                db.save_morning_status(status_text, name)
+            except Exception:
+                log.exception("morning status generation failed for project %s", name)
+                status_text = None
+            status_by_project[name] = status_text
 
-        project_cards = _notify.get_morning_cards(review_by_project)
+        today = datetime.now().strftime("%m月%d日")
+        project_cards: dict[str | None, dict] = {}
+        project_cards[None] = feishu.build_morning_report_card("", None, None, today)
+        for _proj in db.list_projects(active_only=True):
+            _pname = _proj["name"]
+            project_cards[_pname] = feishu.build_morning_report_card(
+                _pname, status_by_project.get(_pname), review_by_project.get(_pname), today
+            )
         base_recipients = ADMIN_OPEN_IDS | NOTIFY_OPEN_IDS
         if not base_recipients:
             log.warning("no recipients configured (ADMIN_OPEN_IDS and NOTIFY_OPEN_IDS both empty)")
@@ -1579,10 +1593,10 @@ async def _handle_bot_menu(event: dict):
                 return
             today = datetime.now().strftime("%m月%d日")
             query_project = project if user.get("project") else None
+            status_text = db.get_latest_morning_status(query_project)
             review = db.get_latest_nightly_review(query_project)
             review_text = _strip_merge_candidates_json(review) if review else None
-            risks = db.list_risks(status="open", project=query_project)
-            card = feishu.build_morning_report_card(query_project or "", risks, review_text, today)
+            card = feishu.build_morning_report_card(query_project or "", status_text, review_text, today)
             await send(card)
             return
 
@@ -1594,6 +1608,19 @@ async def _handle_bot_menu(event: dict):
             await send("开始 AI 洗盘，完成后会发送报告。")
             result = await _handle_review_run(
                 "/review run",
+                project=project if user.get("project") else None,
+                user_role=user_role,
+            )
+            await send(result)
+            return
+
+        # PM + 管理员：AI 项目状态汇报
+        if event_key == "run_status":
+            if user_role not in ("pm", "super_admin"):
+                await send("此功能仅限项目经理PM和管理员使用。")
+                return
+            await send("开始生成项目状态汇报，完成后会发送结果。")
+            result = await _handle_status_run(
                 project=project if user.get("project") else None,
                 user_role=user_role,
             )
@@ -1964,6 +1991,23 @@ async def _handle_message(event: dict):
                 "/review run direct      按直接清洗模式执行一次\n\n"
                 "（洗盘模式设置请联系管理员使用 /admin review mode）"
             )
+        await feishu.send_reply(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return
+
+    # ── PM / 管理员：项目状态汇报 ──
+    if text.startswith("/status"):
+        if user_role not in ("pm", "super_admin"):
+            await feishu.send_reply(chat_id, "此命令仅限项目经理PM和管理员使用。",
+                                   FEISHU_APP_ID, FEISHU_APP_SECRET)
+            return
+        parts = text.split()
+        sub = parts[1].lower() if len(parts) > 1 else ""
+        if sub == "run":
+            await feishu.send_reply(chat_id, "开始生成项目状态汇报，完成后会发送结果。",
+                                   FEISHU_APP_ID, FEISHU_APP_SECRET)
+            reply = await _handle_status_run(project=project, user_role=user_role)
+        else:
+            reply = "/status run    立即生成项目状态汇报，结果发送给所有管理员和 PM"
         await feishu.send_reply(chat_id, reply, FEISHU_APP_ID, FEISHU_APP_SECRET)
         return
 
@@ -2601,6 +2645,64 @@ async def _handle_admin_review_run(text: str, chat_id: str = "") -> str:
 
     results = await _run_review_all_projects(mode)
     return _review_all_summary(results, mode).replace("AI 洗盘", "手动 AI 洗盘", 1)
+
+
+async def _run_status_single(project: str) -> str | None:
+    """单项目状态汇报：生成并保存，返回状态文本（失败返回 None）。"""
+    try:
+        status_text = await ai_client.generate_project_status(project)
+        db.save_morning_status(status_text, project)
+        return status_text
+    except Exception:
+        log.exception("status generation failed for project %s", project)
+        return None
+
+
+async def _run_status_all_projects() -> list[tuple[str, str | None]]:
+    """管理员：遍历所有活跃项目逐一生成状态汇报。
+    返回 [(project_name, status_text_or_None), ...]。
+    """
+    results: list[tuple[str, str | None]] = []
+    for proj in db.list_projects(active_only=True):
+        name = proj["name"]
+        status_text = await _run_status_single(name)
+        proj_pm_ids = _get_project_pm_ids(name)
+        recipients = set(ADMIN_OPEN_IDS) | proj_pm_ids
+        if status_text:
+            card = feishu.build_morning_report_card(
+                name, status_text, None, datetime.now().strftime("%m月%d日")
+            )
+            for uid in recipients:
+                await feishu.send_reply_to_user(uid, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        results.append((name, status_text))
+    return results
+
+
+async def _handle_status_run(project: str | None = None, user_role: str = "pm") -> str:
+    """PM/管理员均可用：/status run"""
+    if user_role == "super_admin":
+        results = await _run_status_all_projects()
+        done = [name for name, txt in results if txt]
+        if not done:
+            return "当前没有活跃项目，未生成状态汇报。"
+        return (
+            f"✓ 已完成项目状态汇报，共 {len(done)} 个项目：{'、'.join(done)}，"
+            "结果已发送给各项目相关人员。"
+        )
+    else:
+        if not project:
+            return "您当前未绑定项目，无法生成状态汇报。请先绑定项目或联系管理员。"
+        status_text = await _run_status_single(project)
+        if not status_text:
+            return f"项目「{project}」状态汇报生成失败，请稍后重试。"
+        proj_pm_ids = _get_project_pm_ids(project)
+        recipients = set(ADMIN_OPEN_IDS) | proj_pm_ids
+        card = feishu.build_morning_report_card(
+            project, status_text, None, datetime.now().strftime("%m月%d日")
+        )
+        for uid in recipients:
+            await feishu.send_reply_to_user(uid, card, FEISHU_APP_ID, FEISHU_APP_SECRET)
+        return f"✓ 已完成「{project}」状态汇报，结果已发送给相关人员。"
 
 
 async def _handle_admin_user_approve_reject(text: str) -> str:

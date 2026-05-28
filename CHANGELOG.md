@@ -30,7 +30,10 @@
 | v1.0.8 | 已部署 | 修复群聊 @Bot mention 未剥除导致命令解析错误；群聊切换项目绑定时自动清空对话历史并提示 |
 | v1.0.9 | 已部署 | 修复卡片"全部保存"报错 -356：_card() 和 _resp() 的 config 补充 update_multi:true，满足 schema 2.0 卡片更新要求 |
 | v1.0.10 | 已部署 | 优化 system prompt 数据边界说明：明确上下文才是事实，历史对话建议不代表已入库，消除 AI 上下文污染误判 |
-| v1.0.11 | 本地完成 | 修复定时早报只发管理员问题：sqlite3.Row 不支持 .get() 导致 PM 循环崩溃被吞；重构早报发送逻辑为每个项目一张卡，admin+NOTIFY+该项目PM收同一张 |
+| v1.0.11 | 已部署 | 修复定时早报只发管理员问题：sqlite3.Row 不支持 .get() 导致 PM 循环崩溃被吞；重构早报发送逻辑为每个项目一张卡，admin+NOTIFY+该项目PM收同一张 |
+| v1.1.0 | 已部署 | 洗盘按项目隔离：每次洗盘只处理一个项目数据，报告按项目分开存储；admin 遍历所有活跃项目逐一洗，PM 只洗自己绑定项目 |
+| v1.1.1 | 已部署 | Web 后台管理员接口加权限隔离：/api/ 路由校验飞书 OAuth session，非 super_admin 返回 403 |
+| v1.2.0 | 本地完成 | AI 项目状态汇报独立成命令（/status run + run_status 菜单）；早报卡片改用 AI 生成状态替代静态风险列表；洗盘→状态顺序执行；notify.py 删除内联至 main.py；deploy 脚本更新为用户态 systemd；.env.example 补全 NOTIFY_OPEN_IDS/SESSION_SECRET/ADMIN_REDIRECT_URI |
 
 ## 已实现功能清单
 

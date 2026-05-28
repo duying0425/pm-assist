@@ -1276,31 +1276,15 @@ def build_clarify_card(question: str, opts: list[str], chat_id: str,
 
 # ── 早报卡片 ──────────────────────────────────────────────────
 
-def build_morning_report_card(project_name: str, risks: list,
+def build_morning_report_card(project_name: str, status_text: str | None,
                                review_text: str | None, today: str) -> dict:
-    """每日早报卡片：风险摘要 + 可选 AI 洗盘摘要。"""
-    _TYPE_ZH = {"risk": "风险", "issue": "问题", "blocker": "阻塞项", "dependency": "依赖"}
+    """每日早报卡片：AI 项目状态汇报 + 可选 AI 洗盘摘要。"""
     elements: list = []
 
-    if risks:
-        high   = [r for r in risks if r.get("priority") == "high"]
-        medium = [r for r in risks if r.get("priority") == "medium"]
-        low    = [r for r in risks if r.get("priority") == "low"]
-
-        risk_lines: list[str] = []
-        for group, icon, label in ((high, "🔴", "高"), (medium, "🟡", "中"), (low, "🟢", "低")):
-            if not group:
-                continue
-            risk_lines.append(f"**{icon} {label}优先级 · {len(group)} 条**")
-            for r in group:
-                typ = _TYPE_ZH.get(r.get("type", ""), r.get("type", ""))
-                owner = f"（{r['owner']}）" if r.get("owner") else ""
-                due = f" ⏰{r['due_date']}" if r.get("due_date") else ""
-                risk_lines.append(f"- #{r['id']} [{typ}] {r['title']}{owner}{due}")
-        risk_lines.append(f"\n共 {len(risks)} 条待处理")
-        elements.append(_md("\n".join(risk_lines)))
+    if status_text:
+        elements.append(_md(f"**📊 项目状态**\n{status_text}"))
     else:
-        elements.append(_md("✅ 当前无待处理风险/问题"))
+        elements.append(_md("_（暂无状态数据）_"))
 
     if review_text:
         elements.append({"tag": "hr"})

@@ -377,7 +377,7 @@ def delete_fact(fact_id: int):
 
 def list_facts(type_: str | None = None, dimension: str | None = None,
                status: str | None = "active", project: str | None = None) -> list:
-    clauses, params = ["type != 'report'"], []
+    clauses, params = ["type NOT IN ('report', 'morning_status')"], []
     if type_:
         clauses.append("type=?")
         params.append(type_)
@@ -870,7 +870,7 @@ def get_all_facts_for_review(project: str) -> str:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT id, type, dimension, title, body, priority, owner, due_date, project, updated_at"
-            " FROM facts WHERE status='active' AND type != 'report' AND project=?"
+            " FROM facts WHERE status='active' AND type NOT IN ('report', 'morning_status') AND project=?"
             " ORDER BY dimension, type, id",
             (project,)
         ).fetchall()
@@ -1123,6 +1123,32 @@ def get_latest_nightly_review(project: str | None = None) -> str | None:
     return row["body"] if row else None
 
 
+def save_morning_status(content: str, project: str) -> int:
+    today = datetime.now().strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO facts(type,dimension,title,body,status,project,source)"
+            " VALUES(?,?,?,?,?,?,?)",
+            ("morning_status", "system", f"AI早报状态 {today}", content, "active", project, "ai"),
+        )
+        return cur.lastrowid
+
+
+def get_latest_morning_status(project: str | None = None) -> str | None:
+    with get_conn() as conn:
+        if project:
+            row = conn.execute(
+                "SELECT body FROM facts WHERE type='morning_status' AND project=?"
+                " ORDER BY id DESC LIMIT 1", (project,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT body FROM facts WHERE type='morning_status'"
+                " ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+    return row["body"] if row else None
+
+
 def get_setting(key: str, default: str = "") -> str:
     with get_conn() as conn:
         row = conn.execute("SELECT value FROM system_settings WHERE key=?", (key,)).fetchone()
@@ -1313,7 +1339,7 @@ def get_system_stats() -> dict:
         user_rows = conn.execute("SELECT role, status, COUNT(*) as cnt FROM users GROUP BY role, status").fetchall()
         project_count = conn.execute("SELECT COUNT(*) FROM projects WHERE active=1").fetchone()[0]
         fact_rows = conn.execute(
-            "SELECT type, COUNT(*) as cnt FROM facts WHERE status='active' AND type!='report' GROUP BY type"
+            "SELECT type, COUNT(*) as cnt FROM facts WHERE status='active' AND type NOT IN ('report', 'morning_status') GROUP BY type"
         ).fetchall()
         todo_rows = conn.execute(
             "SELECT status, COUNT(*) as cnt FROM todos GROUP BY status"

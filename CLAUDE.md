@@ -35,7 +35,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 状态：`systemctl --user status pm-assist`
 - 日志：`journalctl --user -u pm-assist -f`（或直接看 `logs/app.log`）
 - 部署新代码后：`scp` 上传文件，然后 `systemctl --user restart pm-assist`
-- 早报推送由 APScheduler 内置于 FastAPI 处理，**不要同时开 crontab 跑 notify.py**，否则主管理员会收到两份
+- 早报推送由 APScheduler 内置于 FastAPI 处理（早报卡片构建逻辑已内联至 main.py，notify.py 已删除）
 
 ## 版本管理
 - 版本号存于 `VERSION` 文件（当前 `1.0.6`），语义化：`major.feature.patch`
@@ -57,7 +57,6 @@ pm-assist/
 ├── db.py            # SQLite CRUD：四层数据（assumptions/org_units/facts/todos）+ 用户/项目
 ├── web_admin.py     # Web 管理后台 REST API（FastAPI Router，挂载于 /admin）
 ├── config.py        # 环境变量加载（从 .env 读取）
-├── notify.py        # 消息推送：build_risk_section() + build_morning_report(review)
 ├── VERSION          # 版本号文件，格式 x.y.z
 ├── static/
 │   └── admin.html   # Web 管理后台单页 UI（纯 HTML/CSS/JS，无外部依赖）
@@ -262,6 +261,7 @@ name / description / created_by / active / updated_at
 | AI 信息提取确认卡片 | ✗ | ✗ | ✓ | ✓ |
 | /schedule 里程碑查看 | ✗ | ✓ | ✓ | ✓ |
 | /review run（洗盘执行） | ✗ | ✗ | ✓ | ✓ |
+| /status run（状态汇报） | ✗ | ✗ | ✓ | ✓ |
 | /admin 系列 | ✗ | ✗ | ✗ | ✓ |
 
 ### 注册流程
@@ -306,6 +306,9 @@ name / description / created_by / active / updated_at
 /review run                      按当前模式立即洗盘，发送给所有管理员和 PM
 /review run report               临时按仅报告模式执行一次（弹卡片）
 /review run direct               临时按直接执行模式执行一次（自动清洗）
+
+# 项目状态汇报
+/status run                      立即生成项目状态汇报，结果发送给所有管理员和 PM
 
 # 风险管理
 /risk list [open|all]
@@ -395,6 +398,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 | `view_todos` | 查看待办 | pm+ |
 | `view_risks` | 查看风险 | pm+ |
 | `run_review` | AI 洗盘 | pm+ |
+| `run_status` | AI 项目状态汇报 | pm+ |
 | `view_morning_report` | 查看早报 | pm+ |
 | `admin_users` | 人员信息 | member+ |
 
@@ -427,7 +431,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 | 12 | 里程碑列表 | `build_milestone_list_card(rows)` | `/schedule list`；每条附带「详情」按钮 |
 | 13 | 里程碑详情 | `build_milestone_show_card(fact, open_todos)` | `/schedule show`；底部含「🔗 在后台编辑」链接 |
 | 14 | AI 澄清问题 | `build_clarify_card(question, opts, chat_id, sender_open_id)` | 解析到 `===CLARIFY===` 块 |
-| 15 | 早报 | `build_morning_report_card(project_name, risks, review_text, today)` | 定时09:00 / `/review run` |
+| 15 | 早报 | `build_morning_report_card(project_name, status_text, review_text, today)` | 定时09:00 / `/review run` / `/status run` |
 | 16 | 人员信息 | `build_user_info_card(user, members=None, all_users=None)` | `admin_users` 快捷菜单；按角色分级：管理员总览（all_users）/ PM视图（members）/ 成员视图（仅自己） |
 
 **卡片交互 action 汇总**：
@@ -468,13 +472,13 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - Web 后台飞书 OAuth：`SESSION_SECRET` 未配置时每次重启生成新密钥（重启后需重新登录），生产建议在 `.env` 固定配置
 
 ## 服务器当前状态
-- **当前版本：v1.1.1（本地完成，待部署）**
+- **当前版本：v1.2.0（本地完成，待部署）**
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（飞书 OAuth 认证，super_admin / pm 可访问）
 - Web 后台头部显示当前版本号（`/api/version` 接口读取 VERSION 文件）
 - Web 后台支持完整 URL 路由：tab 切换和编辑框均同步地址栏，支持浏览器前进/后退，可直接分享 `?tab=facts&edit=82` 深链
 - `init_db()` 自动创建所有表、索引、幂等执行种子数据，**无需手动迁移**（seed.py / seed_yadi.py / migrate_v2.py 均已内化删除）
 - 首次启动：自动创建 users/projects 表并种入「雅迪」项目；ADMIN_OPEN_IDS 用户首次发消息时自动注册为 super_admin
-- notify.py 的 crontab 条目已删除（早报改由 APScheduler 统一发送）
+- notify.py 已删除（早报卡片构建逻辑内联至 main.py，由 APScheduler 统一调度）
 - DB 每日 03:00 自动备份到 `~/pm-assist/backups/`，保留最近 7 份
 - 用户态 systemd 服务已启用（`pm-assist.service`），开机自启，崩溃自动恢复
 

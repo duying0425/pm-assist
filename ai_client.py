@@ -187,6 +187,39 @@ _REVIEW_PROMPT_TPL = """你是项目数据管家。今天是 {today}，请分析
 """
 
 
+_PROJECT_STATUS_PROMPT_TPL = """你是项目管理助手。今天是 {today}，请基于以下项目数据，用 3-5 段自然语言汇报「{project}」项目的当前整体状态。
+
+要求：
+- 总长不超过 300 字，语言简洁直接，适合早报阅读
+- 涵盖：进展与里程碑状态、主要风险与阻塞、需要关注的核心问题
+- 客观陈述，有具体细节（引用条目名或人员名），不作空洞鼓励
+- 仅输出状态汇报正文，不输出待办建议，不输出 JSON
+
+---
+项目数据（共 {count} 条活跃条目）：
+{facts_text}
+"""
+
+
+async def generate_project_status(project: str) -> str:
+    import db as _db
+    facts_text = _db.get_all_facts_for_review(project)
+    if not facts_text:
+        return f"「{project}」项目暂无活跃数据。"
+    count = facts_text.count("\n  标题:")
+    today = datetime.now().strftime("%Y-%m-%d")
+    prompt = _PROJECT_STATUS_PROMPT_TPL.format(
+        today=today, project=project, count=count, facts_text=facts_text
+    )
+    response = await _client.chat.completions.create(
+        model=AI_MODEL,
+        max_tokens=2000,
+        timeout=60,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
 async def nightly_review(facts_text: str) -> str:
     count = facts_text.count("\n  标题:")
     today = datetime.now().strftime("%Y-%m-%d")
