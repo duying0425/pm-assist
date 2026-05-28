@@ -143,6 +143,15 @@ def api_me(session: dict = Depends(require_auth)):
     return {"open_id": session["open_id"], "name": session["name"], "role": session["role"]}
 
 
+@router.get("/api/version")
+def api_version(session: dict = Depends(require_auth)):
+    try:
+        ver = (Path(__file__).parent / "VERSION").read_text().strip()
+    except Exception:
+        ver = "unknown"
+    return {"version": ver}
+
+
 # ── Stats / Settings ─────────────────────────────────────────
 
 @router.get("/api/stats")

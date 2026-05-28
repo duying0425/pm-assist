@@ -26,6 +26,7 @@
 | v1.0.4 | 已部署 | /join 支持申请创建新项目：项目不存在时 pm 角色发起创建审批，管理员卡片批准后自动建项目并绑定；super_admin 直接创建无需审批 |
 | v1.0.5 | 已部署 | 修复多项目上下文污染：决策/相关方按项目过滤；单聊跟人走（跳过 chat_bindings）；群聊首次 @Bot 自动绑定到 PM/管理员所在项目 |
 | v1.0.6 | 已部署 | 修复单聊项目绑定：Feishu p2p 与群聊 chat_id 同为 oc_ 开头，改用 chat_type 字段区分；单聊彻底跳过 chat_bindings |
+| v1.0.7 | 已部署 | Web 后台头部显示版本号（/api/version 接口 + header-version 展示）|
 
 ## 已实现功能清单
 
@@ -73,3 +74,4 @@
 42. **洗盘报告优化与模式分离**：六节纯自然语言+两节机器可读 JSON；report_only/direct 模式独立
 43. **`view_morning_report` 快捷菜单**：查看最新早报，不触发 AI 调用，读 DB 缓存即时返回
 44. **AI 澄清问题卡片**：AI 解析到 ===CLARIFY=== 块时弹出选项卡片，点击后继续作答
+45. **Web 后台版本号展示**：`/api/version` 接口读取 VERSION 文件，头部实时显示当前版本号

@@ -93,6 +93,7 @@ pre,pre *{font-family:Consolas,'Courier New',monospace!important}
 
 <header class="header">
   <span class="header-title">PM Assist 管理后台</span>
+  <span class="header-version" id="header-version"></span>
   <span class="header-user" id="header-user"></span>
   <button class="btn-logout" onclick="location.href='/admin/logout'">退出</button>
 </header>
@@ -579,8 +580,9 @@ window.addEventListener('popstate', async () => {
 
 // ── Init ──────────────────────────────────────────────────
 async function init(){
-  const me=await api('GET','/me');
+  const [me, ver]=await Promise.all([api('GET','/me'), api('GET','/version')]);
   document.getElementById('header-user').textContent=`${me.name}（${me.role==='super_admin'?'管理员':'PM'}）`;
+  document.getElementById('header-version').textContent=`v${ver.version}`;
   const p=new URLSearchParams(window.location.search);
   const tab=p.get('tab')||'stats';
   const editId=parseInt(p.get('edit')||'0');
