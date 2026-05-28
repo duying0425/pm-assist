@@ -126,7 +126,15 @@ def api_list_users(
     status: str = Query(default=""),
 ):
     rows = db.list_users(role=role or None, status=status or None)
-    return [dict(r) for r in rows]
+    conv_stats = db.get_user_conv_stats()
+    result = []
+    for r in rows:
+        u = dict(r)
+        stats = conv_stats.get(u["open_id"], {"chat_count": 0, "msg_count": 0})
+        u["conv_chat_count"] = stats["chat_count"]
+        u["conv_msg_count"] = stats["msg_count"]
+        result.append(u)
+    return result
 
 
 @router.patch("/api/users/{open_id}")

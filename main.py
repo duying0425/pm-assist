@@ -1386,6 +1386,17 @@ async def _handle_card_trigger(event: dict) -> dict:
             return {"toast": {"type": "info", "content": f"已加载 #{fid} 详情"},
                     "card": {"type": "raw", "data": detail}}
 
+        if action == "view_milestone_detail":
+            mid = int(value.get("id", 0))
+            fact = db.get_fact(mid)
+            if not fact or fact.get("type") != "milestone":
+                return {"toast": {"type": "error", "content": "找不到该里程碑"},
+                        "card": {"type": "raw", "data": feishu.build_md_card("找不到该里程碑")}}
+            open_todos = db.list_todos(status="open", plan_id=mid)
+            detail = feishu.build_milestone_show_card(dict(fact), [dict(t) for t in open_todos])
+            return {"toast": {"type": "info", "content": f"已加载里程碑 #{mid} 详情"},
+                    "card": {"type": "raw", "data": detail}}
+
         # ── AI 建议确认卡片 ──
         if action == "suggestion_save_one":
             return _card_suggestion_save_one(value, chat_id)

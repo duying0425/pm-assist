@@ -52,7 +52,7 @@ def build_risk_section(project: str | None = None) -> str:
         lines.append(f"\n⚪ 低优先级 · {len(low)} 条")
         lines.extend(fmt(r) for r in low)
 
-    lines.append(f"\n共 {len(risks)} 条待处理 | 发送 /admin risk list 查看详情")
+    lines.append(f"\n共 {len(risks)} 条待处理")
     return "\n".join(lines)
 
 

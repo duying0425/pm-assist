@@ -981,6 +981,9 @@ def build_risk_show_card(fact: dict, open_todos: list) -> dict:
         elements.append({"tag": "hr"})
         elements.append(_md("\n".join(todo_lines)))
 
+    elements.append({"tag": "hr"})
+    elements.append(_md(f"[🔗 在后台编辑](https://pm.tmhcorps.cn/admin/?tab=facts&edit={fact['id']})"))
+
     return _card(elements,
                  header=_header(f"#{fact['id']} {fact['title']}", "red"),
                  forward=False)
@@ -1089,13 +1092,16 @@ def build_todo_show_card(todo: dict, source_fact: dict | None, plan_fact: dict |
         elements.append({"tag": "hr"})
         elements.append(_md(todo["body"]))
 
+    elements.append({"tag": "hr"})
+    elements.append(_md(f"[🔗 在后台编辑](https://pm.tmhcorps.cn/admin/?tab=todos&edit={todo['id']})"))
+
     return _card(elements,
                  header=_header(f"#T{todo['id']} {todo['title']}", "blue"),
                  forward=False)
 
 
 def build_milestone_list_card(rows: list) -> dict:
-    """/schedule list 结构化卡片。"""
+    """/schedule list 结构化卡片，每条附带「详情」按钮。"""
     import datetime
     if not rows:
         return build_md_card("暂无里程碑")
@@ -1113,10 +1119,34 @@ def build_milestone_list_card(rows: list) -> dict:
             due_part = ""
         owner_part = f"  负责人：{r['owner']}" if r.get("owner") else ""
 
-        elements.append(_md(
-            f"{status_icon} **#{r['id']}  {r['title']}**\n"
-            f"{due_part}{owner_part}".strip()
-        ))
+        elements.append({
+            "tag": "column_set",
+            "flex_mode": "none",
+            "horizontal_spacing": "8px",
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 5,
+                    "elements": [_lark_div(
+                        f"{status_icon} **#{r['id']}  {r['title']}**\n"
+                        f"{due_part}{owner_part}".strip()
+                    )],
+                },
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [{
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "详情"},
+                        "type": "default",
+                        "value": {"action": "view_milestone_detail", "id": r["id"]},
+                    }],
+                },
+            ],
+        })
         elements.append({"tag": "hr"})
 
     if elements and elements[-1]["tag"] == "hr":
@@ -1155,6 +1185,9 @@ def build_milestone_show_card(fact: dict, open_todos: list) -> dict:
             todo_lines.append(f"- {p} #T{t['id']} {t['title']}{owner_s}")
         elements.append({"tag": "hr"})
         elements.append(_md("\n".join(todo_lines)))
+
+    elements.append({"tag": "hr"})
+    elements.append(_md(f"[🔗 在后台编辑](https://pm.tmhcorps.cn/admin/?tab=facts&edit={fact['id']})"))
 
     header_color = "yellow" if overdue else "green"
     return _card(elements,

@@ -1201,6 +1201,20 @@ def list_users(role: str | None = None, status: str | None = None) -> list:
         ).fetchall()
 
 
+def get_user_conv_stats() -> dict[str, dict]:
+    """返回每个用户的会话统计：{open_id: {chat_count, msg_count}}。"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT uci.open_id,"
+            " COUNT(DISTINCT uci.chat_id) AS chat_count,"
+            " COUNT(c.id) AS msg_count"
+            " FROM user_chat_ids uci"
+            " LEFT JOIN conversations c ON uci.chat_id = c.chat_id"
+            " GROUP BY uci.open_id"
+        ).fetchall()
+    return {r["open_id"]: {"chat_count": r["chat_count"], "msg_count": r["msg_count"]} for r in rows}
+
+
 def get_users_summary() -> str:
     """返回用户列表摘要，供管理员 AI 上下文使用，以便 AI 回答"谁在哪个项目"。"""
     _ROLE_ZH = {"super_admin": "管理员", "pm": "项目经理", "member": "成员"}
@@ -1285,6 +1299,12 @@ def get_system_stats() -> dict:
         review_row = conn.execute(
             "SELECT created_at FROM facts WHERE type='report' ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        conv_chat_count = conn.execute(
+            "SELECT COUNT(DISTINCT chat_id) FROM conversations"
+        ).fetchone()[0]
+        conv_msg_count = conn.execute(
+            "SELECT COUNT(*) FROM conversations"
+        ).fetchone()[0]
     return {
         "users": [dict(r) for r in user_rows],
         "project_count": project_count,
@@ -1292,6 +1312,8 @@ def get_system_stats() -> dict:
         "todos": [dict(r) for r in todo_rows],
         "last_review": review_row["created_at"][:10] if review_row else "无",
         "review_mode": get_setting("nightly_review_mode", "report_only"),
+        "conv_chat_count": conv_chat_count,
+        "conv_msg_count": conv_msg_count,
     }
 
 

@@ -181,6 +181,7 @@ pre,pre *{font-family:Consolas,'Courier New',monospace!important}
         <thead><tr>
           <th>姓名 / open_id</th><th style="width:90px">角色</th>
           <th style="width:80px">项目</th><th style="width:76px">状态</th>
+          <th style="width:80px">会话</th>
           <th style="width:90px">注册时间</th><th style="width:160px">操作</th>
         </tr></thead>
         <tbody id="users-tbody"></tbody>
@@ -332,6 +333,7 @@ async function loadStats(){
       <div class="stat-card"><div class="stat-val">${ftotal}</div><div class="stat-lbl">知识库条目</div></div>
       <div class="stat-card"><div class="stat-val">${tm.open||0}</div><div class="stat-lbl">待办进行中</div></div>
       <div class="stat-card" style="${pending?'border-color:#f59e0b':''}"><div class="stat-val">${active}</div><div class="stat-lbl">活跃用户${pending?` <span style="color:#d97706;font-size:12px">(${pending}待审)</span>`:''}</div></div>
+      <div class="stat-card"><div class="stat-val">${stats.conv_chat_count||0}</div><div class="stat-lbl">活跃会话<span style="font-size:11px;color:var(--muted);display:block">${stats.conv_msg_count||0} 条消息</span></div></div>
     </div>
     <div class="mini-grid">
       <div class="mini-card"><h4>知识库分布</h4>${Object.entries(TYPE_ZH).filter(([t])=>fm[t]).map(([t])=>`<div class="mini-row">${tbdg(t)}<span>${fm[t]} 条</span></div>`).join('')||'<span style="color:var(--muted)">暂无</span>'}</div>
@@ -438,6 +440,7 @@ async function loadUsers(){
     <td>${rbdg(u.role)}</td>
     <td>${esc(u.project||'—')}</td>
     <td>${usbdg(u.status)}</td>
+    <td class="date" style="text-align:center">${u.conv_msg_count?`<span title="${u.conv_chat_count}个会话·${u.conv_msg_count}条消息" style="cursor:default">${u.conv_msg_count}</span>`:'—'}</td>
     <td class="date">${fd(u.created_at)}</td>
     <td><div class="actions">${u.status==='pending'
       ?`<button class="btn btn-sm btn-success-ghost" onclick="approveUser('${escA(u.open_id)}','${escA(u.role)}','${escA(u.project)}')">批准</button><button class="btn btn-sm btn-danger-ghost" onclick="rejectUser('${escA(u.open_id)}')">拒绝</button>`
@@ -542,7 +545,27 @@ function stopAutoRefresh(){
 }
 
 // ── Init ──────────────────────────────────────────────────
-loadStats();
+async function init(){
+  const params=new URLSearchParams(window.location.search);
+  const tab=params.get('tab');
+  const editId=parseInt(params.get('edit')||'0');
+  if(tab&&editId){
+    // 切换 tab（不触发 loadStats，直接切页面）
+    document.querySelectorAll('.tab-content').forEach(el=>el.style.display='none');
+    document.querySelectorAll('.tab-btn').forEach(el=>el.classList.remove('active'));
+    document.getElementById('tab-'+tab)?.style.setProperty('display','');
+    document.querySelector(`[data-tab="${tab}"]`)?.classList.add('active');
+    // 先加载项目列表（表单下拉依赖）
+    projects=await api('GET','/projects');
+    updateProjSelects();
+    if(tab==='facts'){await loadFacts();editFact(editId);}
+    else if(tab==='todos'){await loadTodos();editTodo(editId);}
+    else loadStats();
+  }else{
+    loadStats();
+  }
+}
+init();
 </script>
 </body>
 </html>
