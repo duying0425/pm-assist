@@ -1776,9 +1776,9 @@ async def _handle_message(event: dict):
                 elif tag == "at":
                     uid  = node.get("user_id", "")
                     uname = node.get("user_name", "")
-                    if uid and uname:
-                        db.upsert_person(uid, uname)
-                    if not node.get("is_bot", False):
+                    if uid != BOT_OPEN_ID:
+                        if uid and uname:
+                            db.upsert_person(uid, uname)
                         inline.append(f"@{uname}" if uname else "")
                 elif tag == "a":
                     inline.append(node.get("text", ""))
@@ -1787,26 +1787,23 @@ async def _handle_message(event: dict):
         text = "\n".join(para_texts).strip()
         # 去掉 post 消息开头的 @Bot（飞书群里 @Bot 会在富文本首节点）
         # 注：post 消息的 mentions 字段与 text 消息相同
+        # 缓存 post 消息 mentions 里的人员信息（key替换已在 at 节点处理，此处只做缓存）
         for mention in message.get("mentions", []):
-            if mention.get("is_bot", False):
-                key = mention.get("key", "")
-                if key:
-                    text = text.replace(key, "").strip()
-            else:
-                open_id = mention.get("id", {}).get("open_id", "")
-                name = mention.get("name", "")
-                if open_id and name:
-                    db.upsert_person(open_id, name)
+            open_id = mention.get("id", {}).get("open_id", "")
+            name = mention.get("name", "")
+            if open_id and name and open_id != BOT_OPEN_ID:
+                db.upsert_person(open_id, name)
     else:
         text = raw.get("text", "").strip()
         for mention in message.get("mentions", []):
             key = mention.get("key", "")
             if not key:
                 continue
-            if mention.get("is_bot", False):
+            open_id = mention.get("id", {}).get("open_id", "")
+            if open_id == BOT_OPEN_ID:
+                # Bot @mention：直接剥除，不留占位文字
                 text = text.replace(key, "").strip()
             else:
-                open_id = mention.get("id", {}).get("open_id", "")
                 name = mention.get("name", "")
                 if open_id and name:
                     db.upsert_person(open_id, name)
@@ -3151,7 +3148,8 @@ def _handle_admin_project(args: list[str], sender_open_id: str = "", chat_id: st
         if not chat_id:
             return "无法获取当前群聊 ID，请在群聊中使用此命令"
         db.set_chat_binding(chat_id, proj_name)
-        return f"✓ 当前群聊已绑定到项目「{proj_name}」"
+        db.clear_history(chat_id)
+        return f"✓ 当前群聊已绑定到项目「{proj_name}」\n已自动清除本群对话历史，避免旧项目上下文干扰。"
 
     if sub == "unbind":
         if not chat_id:
