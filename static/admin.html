@@ -97,6 +97,7 @@ tr:hover td{background:#fafafa}
   <button class="tab-btn"        data-tab="todos"       onclick="showTab('todos')">待办</button>
   <button class="tab-btn"        data-tab="users"       onclick="showTab('users')">用户</button>
   <button class="tab-btn"        data-tab="assumptions" onclick="showTab('assumptions')">预设</button>
+  <button class="tab-btn"        data-tab="logs"        onclick="showTab('logs')">日志</button>
 </nav>
 
 <div class="content">
@@ -211,6 +212,25 @@ tr:hover td{background:#fafafa}
     </div>
   </div>
 
+  <!-- 日志 -->
+  <div id="tab-logs" class="tab-content" style="display:none">
+    <div class="toolbar">
+      <span class="toolbar-label">应用日志</span>
+      <select id="log-lines" onchange="loadLogs()">
+        <option value="50">最后 50 行</option>
+        <option value="100" selected>最后 100 行</option>
+        <option value="200">最后 200 行</option>
+        <option value="500">最后 500 行</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="log-auto-refresh" onchange="toggleAutoRefresh()"> 自动刷新（5秒）
+      </label>
+      <button class="btn" onclick="loadLogs()">刷新</button>
+    </div>
+    <div id="log-meta" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
+    <pre id="log-output" style="background:#1e1e2e;color:#cdd6f4;padding:14px;border-radius:8px;font-size:12px;line-height:1.6;overflow:auto;max-height:65vh;white-space:pre-wrap;word-break:break-all;margin:0"></pre>
+  </div>
+
 </div><!-- .content -->
 
 <!-- Modal -->
@@ -285,11 +305,13 @@ function showTab(name){
   document.querySelectorAll('.tab-btn').forEach(el=>el.classList.remove('active'));
   document.getElementById('tab-'+name).style.display='';
   document.querySelector(`[data-tab="${name}"]`).classList.add('active');
+  stopAutoRefresh();
   if(name==='stats')loadStats();
   else if(name==='facts')loadFacts();
   else if(name==='todos')loadTodos();
   else if(name==='users')loadUsers();
   else if(name==='assumptions')loadAssumptions();
+  else if(name==='logs')loadLogs();
 }
 
 // ── Stats ─────────────────────────────────────────────────
@@ -482,6 +504,41 @@ async function submitModal(){
   try{await modalCb();closeModal();}catch(e){}finally{btn.disabled=false;}
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+
+// ── Logs ──────────────────────────────────────────────────
+let logRefreshTimer=null;
+
+async function loadLogs(){
+  const n=document.getElementById('log-lines')?.value||100;
+  const data=await api('GET',`/logs?lines=${n}`);
+  const meta=document.getElementById('log-meta');
+  const out=document.getElementById('log-output');
+  if(!data.exists){out.textContent='日志文件不存在';meta.textContent='';return;}
+  const kb=(data.size/1024).toFixed(1);
+  meta.textContent=`共 ${data.total} 行 · 文件 ${kb} KB · 更新于 ${new Date().toLocaleTimeString('zh-CN')}`;
+  out.innerHTML=data.lines.map(colorLine).join('\n');
+  out.scrollTop=out.scrollHeight;
+}
+
+function colorLine(line){
+  const e=esc(line);
+  if(/\bERROR\b|Exception|Traceback/.test(line))return`<span style="color:#f38ba8">${e}</span>`;
+  if(/\bWARNING\b|\bWARN\b/.test(line))return`<span style="color:#fab387">${e}</span>`;
+  if(/\bINFO\b/.test(line))return`<span style="color:#cdd6f4">${e}</span>`;
+  return`<span style="color:#7f849c">${e}</span>`;
+}
+
+function toggleAutoRefresh(){
+  const on=document.getElementById('log-auto-refresh')?.checked;
+  if(on){logRefreshTimer=setInterval(loadLogs,5000);}
+  else{clearInterval(logRefreshTimer);logRefreshTimer=null;}
+}
+
+function stopAutoRefresh(){
+  clearInterval(logRefreshTimer);logRefreshTimer=null;
+  const cb=document.getElementById('log-auto-refresh');
+  if(cb)cb.checked=false;
+}
 
 // ── Init ──────────────────────────────────────────────────
 loadStats();

@@ -167,3 +167,23 @@ def api_update_assumption(assumption_id: int, data: dict):
 def api_archive_assumption(assumption_id: int):
     db.update_assumption(assumption_id, active=0)
     return {"ok": True}
+
+
+# ── Logs ───────────────────────────────────────────────────
+
+_LOG = Path(__file__).parent / "logs" / "app.log"
+
+
+@router.get("/api/logs")
+def api_get_logs(lines: int = Query(default=100, le=500)):
+    if not _LOG.exists():
+        return {"lines": [], "total": 0, "size": 0, "exists": False}
+    with _LOG.open(encoding="utf-8", errors="replace") as f:
+        all_lines = f.readlines()
+    tail = all_lines[-lines:]
+    return {
+        "lines": [ln.rstrip("\n") for ln in tail],
+        "total": len(all_lines),
+        "size": _LOG.stat().st_size,
+        "exists": True,
+    }
