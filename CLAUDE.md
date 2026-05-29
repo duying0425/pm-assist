@@ -58,6 +58,8 @@ pm-assist/
 ├── web_admin.py     # Web 管理后台 REST API（FastAPI Router，挂载于 /admin）
 ├── config.py        # 环境变量加载（从 .env 读取）
 ├── VERSION          # 版本号文件，格式 x.y.z
+├── CHANGELOG.md     # 版本部署记录（每次发版更新）
+├── PM手册.md        # 面向 PM 用户的操作手册（命令速查、使用场景说明，随功能更新同步维护）
 ├── static/
 │   └── admin.html   # Web 管理后台单页 UI（纯 HTML/CSS/JS，无外部依赖）
 ├── deploy/
@@ -461,7 +463,6 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 
 ## 已知坑
 - SSH 登录用 `duyingfang` 而非 `root`
-- `aliyun.tmhcorps.cn` DNS 须设为"仅DNS"（灰云），否则 SSH 被 Cloudflare 拦截
 - 飞书卡片回调响应 body 必须包含 `card.type="raw"` 和 `data` 包装层
 - APScheduler 的定时任务在服务重启后重新注册，若服务在 09:00 后重启，当天洗盘+早报会跳过（次日才补跑）
 - 飞书更新卡片消息：必须用 `PATCH /im/v1/messages/{id}`（不带 `/body`），`/body` 子路径只支持 text/post，不支持 interactive；schema 2.0 卡片更新时 config 中须加 `"update_multi": true`
@@ -470,6 +471,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - 飞书 `mentions` 字段中**没有 `is_bot` 属性**；判断 Bot 是否被 @需对比 Bot 自身 open_id（启动时由 `/bot/v3/info` 拉取，存于全局 `BOT_OPEN_ID`）
 - Web 后台飞书 OAuth：`/authen/v1/access_token` 不支持请求体带 `app_id+app_secret+code`（飞书文档有误）；必须先 POST `/auth/v3/app_access_token/internal` 拿 `app_access_token`，再用 `Authorization: Bearer {app_access_token}` + body `{grant_type, code}` 换用户信息
 - Web 后台飞书 OAuth：`SESSION_SECRET` 未配置时每次重启生成新密钥（重启后需重新登录），生产建议在 `.env` 固定配置
+- **`db.py` 查询函数须返回 `dict`**：`sqlite3.Row` 对象不支持 `.get()`，凡是 `fetchall()` 的函数若外部代码用 `.get()` 访问字段，必须加 `[dict(r) for r in ...]` 转换；`fetchone()` 用 `dict(row) if row else None`。`list_users()` 已修复（v1.2.1），新增查询函数注意遵守同一规范
 
 ## 服务器当前状态
 - **当前版本：v1.2.1（已部署）**
@@ -482,7 +484,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - DB 每日 03:00 自动备份到 `~/pm-assist/backups/`，保留最近 7 份
 - 用户态 systemd 服务已启用（`pm-assist.service`），开机自启，崩溃自动恢复
 
-> 历史版本部署记录见 `CHANGELOG.md`
+> 历史版本部署记录见 `CHANGELOG.md`；面向 PM 用户的操作手册见 `PM手册.md`（新增命令或交互变更时同步更新）
 
 ## 待开发
 - [x] systemd 自动重启（用户态 systemd 服务，已实现）
