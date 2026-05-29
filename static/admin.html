@@ -135,6 +135,7 @@ pre,pre *{font-family:Consolas,'Courier New',monospace!important}
       <select id="facts-project" class="project-filter" onchange="loadFacts()">
         <option value="">全部项目</option>
       </select>
+      <span id="facts-count" style="font-size:12px;color:var(--muted);margin-left:auto"></span>
       <button class="btn btn-primary" onclick="openAddFact()">＋ 新增</button>
     </div>
     <div class="table-wrap">
@@ -162,6 +163,7 @@ pre,pre *{font-family:Consolas,'Courier New',monospace!important}
       <select id="todos-project" class="project-filter" onchange="loadTodos()">
         <option value="">全部项目</option>
       </select>
+      <span id="todos-count" style="font-size:12px;color:var(--muted);margin-left:auto"></span>
       <button class="btn btn-primary" onclick="openAddTodo()">＋ 新增</button>
     </div>
     <div class="table-wrap">
@@ -181,6 +183,7 @@ pre,pre *{font-family:Consolas,'Courier New',monospace!important}
   <div id="tab-users" class="tab-content" style="display:none">
     <div class="toolbar">
       <span class="toolbar-label">用户管理</span>
+      <span id="users-count" style="font-size:12px;color:var(--muted)"></span>
       <span id="pending-badge"></span>
     </div>
     <div class="table-wrap">
@@ -207,6 +210,7 @@ pre,pre *{font-family:Consolas,'Courier New',monospace!important}
       <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
         <input type="checkbox" id="assumptions-archived" onchange="loadAssumptions()"> 显示已归档
       </label>
+      <span id="assumptions-count" style="font-size:12px;color:var(--muted);margin-left:auto"></span>
       <button class="btn btn-primary" onclick="openAddAssumption()">＋ 新增</button>
     </div>
     <div class="table-wrap">
@@ -371,6 +375,7 @@ async function setReviewMode(mode){
 async function loadFacts(){
   const p=new URLSearchParams({type:document.getElementById('facts-type')?.value||'',status:document.getElementById('facts-status')?.value||'active',project:document.getElementById('facts-project')?.value||''});
   lastFacts=await api('GET',`/facts?${p}`);
+  document.getElementById('facts-count').textContent=lastFacts.length+' 条';
   const tb=document.getElementById('facts-tbody');
   if(!lastFacts.length){tb.innerHTML='<tr><td colspan="8" class="empty">暂无数据</td></tr>';return;}
   tb.innerHTML=lastFacts.map(f=>`<tr>
@@ -417,6 +422,7 @@ function collectFact(){return{type:document.getElementById('f-type').value,title
 async function loadTodos(){
   const p=new URLSearchParams({status:document.getElementById('todos-status')?.value||'open',project:document.getElementById('todos-project')?.value||''});
   lastTodos=await api('GET',`/todos?${p}`);
+  document.getElementById('todos-count').textContent=lastTodos.length+' 条';
   const tb=document.getElementById('todos-tbody');
   if(!lastTodos.length){tb.innerHTML='<tr><td colspan="7" class="empty">暂无数据</td></tr>';return;}
   tb.innerHTML=lastTodos.map(t=>`<tr>
@@ -456,6 +462,7 @@ function collectTodo(){return{title:document.getElementById('t-title').value.tri
 // ── Users ─────────────────────────────────────────────────
 async function loadUsers(){
   lastUsers=await api('GET','/users');
+  document.getElementById('users-count').textContent=lastUsers.length+' 条';
   const pending=lastUsers.filter(u=>u.status==='pending');
   document.getElementById('pending-badge').innerHTML=pending.length?bdg(pending.length+' 待审批','#fef3c7','#92400e'):'';
   document.getElementById('users-tbody').innerHTML=lastUsers.map(u=>`<tr style="${u.status==='pending'?'background:#fffbeb':''}">
@@ -491,6 +498,7 @@ async function loadAssumptions(){
   const scope=document.getElementById('assumptions-scope')?.value||'';
   const activeOnly=!document.getElementById('assumptions-archived')?.checked;
   lastAssumptions=await api('GET',`/assumptions?scope=${encodeURIComponent(scope)}&active_only=${activeOnly}`);
+  document.getElementById('assumptions-count').textContent=lastAssumptions.length+' 条';
   const tb=document.getElementById('assumptions-tbody');
   if(!lastAssumptions.length){tb.innerHTML='<tr><td colspan="5" class="empty">暂无数据</td></tr>';return;}
   tb.innerHTML=lastAssumptions.map(a=>`<tr style="${!a.active?'opacity:.5':''}">
@@ -654,11 +662,12 @@ async function init(){
   currentUser=me;
   document.getElementById('header-user').textContent=`${me.name}（${me.role==='super_admin'?'管理员':'PM'}）`;
   document.getElementById('header-version').textContent=`v${ver.version}`;
+  if(me.role!=='super_admin') document.querySelector('[data-tab="settings"]').style.display='none';
   const p=new URLSearchParams(window.location.search);
   const tab=p.get('tab')||'stats';
   const editId=parseInt(p.get('edit')||'0');
-  // 非 stats tab 需先加载项目列表供表单下拉使用
-  if(editId && tab!=='stats'){projects=await api('GET','/projects');updateProjSelects();}
+  // 非 stats tab 需先加载项目列表供表单下拉使用（stats 会在 loadStats 里加载）
+  if(tab!=='stats'){projects=await api('GET','/projects');updateProjSelects();}
   _noPush=true;
   await showTab(tab, false);
   history.replaceState({tab, edit:editId||undefined}, '', editId?`?tab=${tab}&edit=${editId}`:`?tab=${tab}`);
