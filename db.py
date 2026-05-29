@@ -576,10 +576,16 @@ def list_todos(status: str | None = "open", project: str | None = None,
 
 
 def get_todos_for_context(project: str | None = None,
-                          open_limit: int = 30,
-                          done_limit: int = 10,
-                          done_days: int = 14) -> str:
+                          open_limit: int | None = None,
+                          done_limit: int | None = None,
+                          done_days: int | None = None) -> str:
     """返回待办事项文本，供 AI 上下文注入。project=None 返回全量（跨项目）。"""
+    if open_limit is None:
+        open_limit = int(get_setting("todo_open_limit", "30"))
+    if done_limit is None:
+        done_limit = int(get_setting("todo_done_limit", "10"))
+    if done_days is None:
+        done_days = int(get_setting("todo_done_days", "14"))
     from datetime import datetime as _dt, timedelta as _td
     _PRIO = {"high": "高", "medium": "中", "low": "低"}
     _RISK_ZH = {"risk": "风险", "issue": "问题", "blocker": "阻塞", "dependency": "依赖"}
@@ -997,7 +1003,7 @@ def get_pending(chat_id: str) -> list[dict]:
         ).fetchone()
     if not row:
         return []
-    if _time.time() - row["created_at"] > PENDING_TTL:
+    if _time.time() - row["created_at"] > int(get_setting("pending_ttl", str(PENDING_TTL))):
         clear_pending(chat_id)
         return []
     return _json.loads(row["items_json"])
@@ -1370,7 +1376,7 @@ def pop_pending_item(chat_id: str, index: int) -> tuple[dict | None, list[dict]]
         row = conn.execute(
             "SELECT items_json, created_at FROM pending_notes WHERE chat_id=?", (chat_id,)
         ).fetchone()
-        if not row or _time.time() - row["created_at"] > PENDING_TTL:
+        if not row or _time.time() - row["created_at"] > int(get_setting("pending_ttl", str(PENDING_TTL))):
             conn.execute("DELETE FROM pending_notes WHERE chat_id=?", (chat_id,))
             return None, []
         items: list[dict] = _json.loads(row["items_json"])

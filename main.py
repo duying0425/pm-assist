@@ -2051,7 +2051,7 @@ async def _handle_message(event: dict):
             text = f"[补充信息：{text}]（关于之前的问题：{clarify_ctx}）"
 
     db.add_message(chat_id, "user", text)
-    history = db.get_history(chat_id, MAX_HISTORY)
+    history = db.get_history(chat_id, int(db.get_setting("max_history", str(MAX_HISTORY))))
     context = db.get_full_context(project)
     if user_role == "super_admin":
         context["users"] = db.get_users_summary()
@@ -2070,7 +2070,7 @@ async def _handle_message(event: dict):
         reply = await asyncio.wait_for(
             ai_client.chat(history, context,
                                sender_info=sender_info_str, role=user_role),
-            timeout=90.0,
+            timeout=float(db.get_setting("chat_timeout", "90")),
         )
     except asyncio.TimeoutError:
         reply = "AI 响应超时，请稍后重试。"
@@ -2260,7 +2260,7 @@ async def _clarify_and_respond(chat_id: str, sender_oid: str, user: dict,
                                project: str, user_text: str):
     """用户回答了澄清问题后，重新调用 AI 并发送结果。"""
     try:
-        history = db.get_history(chat_id, MAX_HISTORY)
+        history = db.get_history(chat_id, int(db.get_setting("max_history", str(MAX_HISTORY))))
         context = db.get_full_context(project)
         if user.get("role") == "super_admin":
             context["users"] = db.get_users_summary()
@@ -2268,7 +2268,7 @@ async def _clarify_and_respond(chat_id: str, sender_oid: str, user: dict,
         role = user.get("role", "pm")
         reply = await asyncio.wait_for(
             ai_client.chat(history, context, sender_info=sender_info, role=role),
-            timeout=90.0,
+            timeout=float(db.get_setting("chat_timeout", "90")),
         )
         reply = _strip_clarify(reply)
         reply = _sanitize_ai_execution_claims(reply)

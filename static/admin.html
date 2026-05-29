@@ -104,6 +104,7 @@ pre,pre *{font-family:Consolas,'Courier New',monospace!important}
   <button class="tab-btn"        data-tab="todos"       onclick="showTab('todos')">待办</button>
   <button class="tab-btn"        data-tab="users"       onclick="showTab('users')">用户</button>
   <button class="tab-btn"        data-tab="assumptions" onclick="showTab('assumptions')">预设</button>
+  <button class="tab-btn"        data-tab="settings"    onclick="showTab('settings')">配置</button>
   <button class="tab-btn"        data-tab="logs"        onclick="showTab('logs')">日志</button>
 </nav>
 
@@ -220,6 +221,14 @@ pre,pre *{font-family:Consolas,'Courier New',monospace!important}
     </div>
   </div>
 
+  <!-- 配置 -->
+  <div id="tab-settings" class="tab-content" style="display:none">
+    <div class="toolbar">
+      <span class="toolbar-label">系统配置</span>
+    </div>
+    <div id="settings-list"></div>
+  </div>
+
   <!-- 日志 -->
   <div id="tab-logs" class="tab-content" style="display:none">
     <div class="toolbar">
@@ -324,6 +333,7 @@ async function showTab(name, push=true){
   else if(name==='todos') await loadTodos();
   else if(name==='users') await loadUsers();
   else if(name==='assumptions') await loadAssumptions();
+  else if(name==='settings') await loadSettings();
   else if(name==='logs') await loadLogs();
 }
 
@@ -353,7 +363,7 @@ async function loadStats(){
     </div>`;
 }
 async function setReviewMode(mode){
-  await api('PATCH','/settings/review-mode',{mode});
+  await api('PATCH','/settings/nightly_review_mode',{value:mode});
   loadStats();
 }
 
@@ -526,6 +536,65 @@ async function submitModal(){
   try{await modalCb();closeModal();}catch(e){}finally{btn.disabled=false;}
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
+
+// ── Settings ──────────────────────────────────────────────
+let lastSettings=[];
+
+async function loadSettings(){
+  if(currentUser.role!=='super_admin'){
+    document.getElementById('settings-list').innerHTML='<p style="color:var(--muted);padding:16px">仅管理员可查看配置</p>';
+    return;
+  }
+  lastSettings=await api('GET','/settings');
+  // 按 group 分组
+  const groups={};
+  for(const s of lastSettings){
+    const g=s.group||'其他';
+    if(!groups[g])groups[g]=[];
+    groups[g].push(s);
+  }
+  let html='';
+  for(const [gname,items] of Object.entries(groups)){
+    html+=`<h4 style="font-size:12px;font-weight:700;text-transform:uppercase;color:var(--muted);margin:20px 0 8px">${esc(gname)}</h4>`;
+    html+=`<div class="table-wrap" style="margin-bottom:4px"><table><tbody>`;
+    for(const s of items){
+      html+=`<tr>
+        <td style="width:180px;font-weight:600;font-size:13px">${esc(s.label)}</td>
+        <td style="font-size:12px;color:var(--muted)">${esc(s.description)}</td>
+        <td style="width:200px">${renderSettingValue(s)}${s.value!==s.default?`<span style="font-size:11px;color:var(--muted);margin-left:6px">默认 ${esc(s.default)}</span>`:''}</td>
+        <td style="width:60px;text-align:right"><button class="btn btn-sm" onclick="editSetting('${escA(s.key)}')">编辑</button></td>
+      </tr>`;
+    }
+    html+=`</tbody></table></div>`;
+  }
+  document.getElementById('settings-list').innerHTML=html;
+}
+
+function renderSettingValue(s){
+  if(s.type==='select'){
+    const opt=s.options.find(o=>o[0]===s.value);
+    return bdg(opt?opt[1]:s.value,'#dbeafe','#1e40af');
+  }
+  return`<code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:12px">${esc(s.value)}</code>`;
+}
+
+function editSetting(key){
+  const s=lastSettings.find(x=>x.key===key);if(!s)return;
+  let formHtml;
+  if(s.type==='select'){
+    formHtml=`<div class="fg"><label>${esc(s.label)}</label><select id="s-value">${s.options.map(o=>`<option value="${escA(o[0])}"${o[0]===s.value?' selected':''}>${esc(o[1])}</option>`).join('')}</select></div>`;
+  } else if(s.type==='number'){
+    formHtml=`<div class="fg"><label>${esc(s.label)}</label><input id="s-value" type="number" value="${escA(s.value)}" min="1" max="200"></div>`;
+  } else {
+    formHtml=`<div class="fg"><label>${esc(s.label)}</label><input id="s-value" value="${escA(s.value)}"></div>`;
+  }
+  formHtml+=`<p style="font-size:12px;color:var(--muted);margin-top:-6px">${esc(s.description)}</p>`;
+  openModal('修改配置：'+s.label, formHtml, async()=>{
+    const val=document.getElementById('s-value').value.trim();
+    await api('PATCH',`/settings/${encodeURIComponent(key)}`,{value:val});
+    await loadSettings();
+  });
+}
 
 // ── Logs ──────────────────────────────────────────────────
 let logRefreshTimer=null;

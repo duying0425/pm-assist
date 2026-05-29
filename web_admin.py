@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 import db
-from config import ADMIN_REDIRECT_URI, FEISHU_APP_ID, FEISHU_APP_SECRET, SESSION_SECRET
+from config import ADMIN_REDIRECT_URI, AI_MODEL, FEISHU_APP_ID, FEISHU_APP_SECRET, MAX_HISTORY, SESSION_SECRET
 
 router = APIRouter(prefix="/admin")
 
@@ -159,20 +159,147 @@ def api_version(session: dict = Depends(require_auth)):
     return {"version": ver}
 
 
-# ── Stats / Settings ─────────────────────────────────────────
+# ── Stats ─────────────────────────────────────────────────────
 
 @router.get("/api/stats")
 def api_stats(session: dict = Depends(require_auth)):
     return db.get_system_stats()
 
 
-@router.patch("/api/settings/review-mode")
-def api_update_review_mode(data: dict, session: dict = Depends(require_super_admin)):
-    mode = data.get("mode", "")
-    if mode not in ("report_only", "direct_cleanup"):
-        return {"error": "mode must be report_only or direct_cleanup"}
-    db.set_setting("nightly_review_mode", mode)
-    return {"ok": True, "mode": mode}
+# ── Settings ──────────────────────────────────────────────────
+
+_SETTINGS_META: dict[str, dict] = {
+    # ── AI 模型 ──────────────────────────────────────────────
+    "ai_model": {
+        "group": "AI 模型",
+        "label": "模型 ID",
+        "description": "OpenRouter 兼容模型 ID，例如 anthropic/claude-sonnet-4-5",
+        "type": "text",
+        "options": [],
+        "default": AI_MODEL,
+    },
+    "max_history": {
+        "group": "AI 模型",
+        "label": "对话历史轮数",
+        "description": "每次 AI 对话携带的最大历史消息条数（建议 10–50）",
+        "type": "number",
+        "options": [],
+        "default": str(MAX_HISTORY),
+    },
+    "chat_max_tokens": {
+        "group": "AI 模型",
+        "label": "对话最大 Token",
+        "description": "AI 对话单次回复的最大输出 token 数",
+        "type": "number",
+        "options": [],
+        "default": "8000",
+    },
+    "chat_timeout": {
+        "group": "AI 模型",
+        "label": "对话超时（秒）",
+        "description": "AI 对话请求的最长等待时间，超时后提示用户重试",
+        "type": "number",
+        "options": [],
+        "default": "90",
+    },
+    # ── AI 洗盘 ──────────────────────────────────────────────
+    "nightly_review_mode": {
+        "group": "AI 洗盘",
+        "label": "洗盘模式",
+        "description": "report_only: 生成报告并弹确认卡片；direct_cleanup: 自动执行清洗动作",
+        "type": "select",
+        "options": [["report_only", "仅报告（推荐）"], ["direct_cleanup", "直接清洗"]],
+        "default": "report_only",
+    },
+    "review_max_tokens": {
+        "group": "AI 洗盘",
+        "label": "洗盘最大 Token",
+        "description": "AI 洗盘报告单次回复的最大输出 token 数（建议 ≥ 8000）",
+        "type": "number",
+        "options": [],
+        "default": "16000",
+    },
+    "review_timeout": {
+        "group": "AI 洗盘",
+        "label": "洗盘超时（秒）",
+        "description": "AI 洗盘请求的最长等待时间（建议 ≥ 120）",
+        "type": "number",
+        "options": [],
+        "default": "180",
+    },
+    # ── AI 上下文 ─────────────────────────────────────────────
+    "todo_open_limit": {
+        "group": "AI 上下文",
+        "label": "注入待办上限（进行中）",
+        "description": "每次注入 AI 上下文的进行中待办最大条数",
+        "type": "number",
+        "options": [],
+        "default": "30",
+    },
+    "todo_done_limit": {
+        "group": "AI 上下文",
+        "label": "注入待办上限（已完成）",
+        "description": "每次注入 AI 上下文的已完成待办最大条数",
+        "type": "number",
+        "options": [],
+        "default": "10",
+    },
+    "todo_done_days": {
+        "group": "AI 上下文",
+        "label": "已完成待办时间窗口（天）",
+        "description": "只将近 N 天内完成的待办注入 AI 上下文",
+        "type": "number",
+        "options": [],
+        "default": "14",
+    },
+    # ── 系统 ─────────────────────────────────────────────────
+    "pending_ttl": {
+        "group": "系统",
+        "label": "确认卡片有效期（秒）",
+        "description": "AI 建议/洗盘确认卡片的过期时间，超时后点击操作无效",
+        "type": "number",
+        "options": [],
+        "default": "1800",
+    },
+}
+
+
+@router.get("/api/settings")
+def api_list_settings(session: dict = Depends(require_super_admin)):
+    result = []
+    for key, meta in _SETTINGS_META.items():
+        result.append({
+            "key": key,
+            "value": db.get_setting(key, meta["default"]),
+            "group": meta.get("group", "其他"),
+            "label": meta["label"],
+            "description": meta["description"],
+            "type": meta["type"],
+            "options": meta["options"],
+            "default": meta["default"],
+        })
+    return result
+
+
+@router.patch("/api/settings/{key}")
+def api_update_setting(key: str, data: dict, session: dict = Depends(require_super_admin)):
+    if key not in _SETTINGS_META:
+        raise HTTPException(status_code=404, detail=f"未知配置项: {key}")
+    value = str(data.get("value", "")).strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="值不能为空")
+    meta = _SETTINGS_META[key]
+    if meta["type"] == "select":
+        valid = [o[0] for o in meta["options"]]
+        if value not in valid:
+            raise HTTPException(status_code=400, detail=f"无效值，允许: {valid}")
+    if meta["type"] == "number":
+        try:
+            int(value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="必须为整数")
+    db.set_setting(key, value)
+    return {"ok": True, "key": key, "value": value}
 
 
 # ── Projects ─────────────────────────────────────────────────

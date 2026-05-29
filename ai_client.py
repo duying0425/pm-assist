@@ -3,7 +3,24 @@ from __future__ import annotations
 from datetime import datetime
 
 from openai import AsyncOpenAI
+import db as _db
 from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, AI_MODEL
+
+
+def _model() -> str:
+    return _db.get_setting("ai_model", AI_MODEL)
+
+def _chat_max_tokens() -> int:
+    return int(_db.get_setting("chat_max_tokens", "8000"))
+
+def _chat_timeout() -> float:
+    return float(_db.get_setting("chat_timeout", "90"))
+
+def _review_max_tokens() -> int:
+    return int(_db.get_setting("review_max_tokens", "16000"))
+
+def _review_timeout() -> float:
+    return float(_db.get_setting("review_timeout", "180"))
 
 _client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY,
@@ -128,9 +145,9 @@ async def chat(history: list[dict], context: dict,
                sender_info: str = "", role: str = "pm") -> str:
     system = _build_system(context, sender_info=sender_info, role=role)
     response = await _client.chat.completions.create(
-        model=AI_MODEL,
-        max_tokens=8000,
-        timeout=90,
+        model=_model(),
+        max_tokens=_chat_max_tokens(),
+        timeout=_chat_timeout(),
         messages=[{"role": "system", "content": system}] + history,
     )
     return response.choices[0].message.content
@@ -212,9 +229,9 @@ async def generate_project_status(project: str) -> str:
         today=today, project=project, count=count, facts_text=facts_text
     )
     response = await _client.chat.completions.create(
-        model=AI_MODEL,
-        max_tokens=2000,
-        timeout=60,
+        model=_model(),
+        max_tokens=_chat_max_tokens(),
+        timeout=_chat_timeout(),
         messages=[{"role": "user", "content": prompt}],
     )
     return (response.choices[0].message.content or "").strip()
@@ -226,9 +243,9 @@ async def nightly_review(facts_text: str) -> str:
     prompt = _REVIEW_PROMPT_TPL.format(today=today, count=count, facts_text=facts_text)
     try:
         response = await _client.chat.completions.create(
-            model=AI_MODEL,
-            max_tokens=16000,
-            timeout=180,
+            model=_model(),
+            max_tokens=_review_max_tokens(),
+            timeout=_review_timeout(),
             messages=[{"role": "user", "content": prompt}],
         )
         content = response.choices[0].message.content or ""
@@ -241,9 +258,9 @@ async def nightly_review(facts_text: str) -> str:
               "必须包含全部十节（含末尾机器可读区），无内容的节写【无】，空数组也要输出。"
         )
         response = await _client.chat.completions.create(
-            model=AI_MODEL,
-            max_tokens=16000,
-            timeout=180,
+            model=_model(),
+            max_tokens=_review_max_tokens(),
+            timeout=_review_timeout(),
             messages=[{"role": "user", "content": retry_prompt}],
         )
         content = response.choices[0].message.content or ""
@@ -283,7 +300,7 @@ async def decompose_risk(fact: dict) -> list[dict]:
     )
     try:
         response = await _client.chat.completions.create(
-            model=AI_MODEL,
+            model=_model(),
             max_tokens=2000,
             messages=[{"role": "user", "content": _DECOMPOSE_PROMPT + fact_text}],
         )
