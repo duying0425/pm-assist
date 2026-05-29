@@ -93,7 +93,7 @@ def _normalize_review_mode(value: str) -> str | None:
     return _REVIEW_MODE_ALIASES.get(value.strip().lower())
 
 
-def _apply_review_commands(report: str) -> list[str]:
+def _apply_review_commands(report: str, project: str = "") -> list[str]:
     """direct 模式：自动执行全部合并建议和清洗建议。"""
     results: list[str] = []
 
@@ -122,6 +122,7 @@ def _apply_review_commands(report: str) -> list[str]:
                     owner=item.get("owner", ""),
                     due_date=item.get("due_date", ""),
                     source="ai",
+                    project=project,
                 )
                 results.append(f"已新增待办：{title}")
             except Exception as e:
@@ -347,7 +348,7 @@ async def _build_and_save_review(mode: str | None = None, project: str = "") -> 
     effective_mode = mode or _get_review_mode()
     report = await ai_client.nightly_review(facts_text)
     if effective_mode == _REVIEW_MODE_DIRECT:
-        results = _apply_review_commands(report)
+        results = _apply_review_commands(report, project)
         report = (
             f"{report}\n\n"
             f"=== 直接清洗执行结果 ===\n"
@@ -372,7 +373,7 @@ async def _send_review_to_recipients(recipients: set[str], report: str):
     log.info("review report sent to %d recipients", len(recipients))
 
 
-def _collect_review_suggestion_items(report: str) -> list[dict]:
+def _collect_review_suggestion_items(report: str, project: str = "") -> list[dict]:
     """将洗盘报告中的合并/清洗候选转为 AI 建议卡片 item 格式。"""
     items: list[dict] = []
     for c in _extract_merge_candidates(report):
@@ -397,15 +398,16 @@ def _collect_review_suggestion_items(report: str) -> list[dict]:
             "owner":    c.get("owner", ""),
             "due_date": c.get("due_date", ""),
             "reason":   c.get("reason", ""),
+            "project":  project,
         })
     return items
 
 
-async def _send_review_suggestions_card(chat_id: str, report: str):
+async def _send_review_suggestions_card(chat_id: str, report: str, project: str = ""):
     """将洗盘的合并+清洗建议合并为一张 AI 建议确认卡片发送给单个用户/群聊。"""
     if not chat_id:
         return
-    items = _collect_review_suggestion_items(report)
+    items = _collect_review_suggestion_items(report, project)
     if not items:
         return
     db.save_pending_commands(chat_id, items)
@@ -430,8 +432,8 @@ async def _broadcast_suggestion_items(open_ids: set[str], items: list[dict]):
     log.info("broadcast %d suggestion items to %d users", len(items), len(open_ids))
 
 
-async def _broadcast_review_suggestions(open_ids: set[str], report: str):
-    items = _collect_review_suggestion_items(report)
+async def _broadcast_review_suggestions(open_ids: set[str], report: str, project: str = ""):
+    items = _collect_review_suggestion_items(report, project)
     await _broadcast_suggestion_items(open_ids, items)
 
 
@@ -507,12 +509,12 @@ async def _morning_review_and_report():
                     continue
                 proj_pm_ids = pm_by_project.get(proj_name, set())
                 if proj_pm_ids:
-                    await _broadcast_review_suggestions(proj_pm_ids, full_report)
+                    await _broadcast_review_suggestions(proj_pm_ids, full_report, proj_name)
             # 管理员收所有项目建议合并为一张卡片
             all_items: list[dict] = []
-            for full_report in full_reports.values():
+            for proj_name, full_report in full_reports.items():
                 if full_report:
-                    all_items.extend(_collect_review_suggestion_items(full_report))
+                    all_items.extend(_collect_review_suggestion_items(full_report, proj_name))
             if all_items:
                 await _broadcast_suggestion_items(ADMIN_OPEN_IDS, all_items)
     except Exception:
@@ -747,6 +749,7 @@ def _apply_review_action(item: dict):
             owner=item.get("owner", ""),
             due_date=item.get("due_date", ""),
             source="ai",
+            project=item.get("project", ""),
         )
         return
     item_id = int(item["id"])
@@ -1109,7 +1112,7 @@ def _enrich_suggestions(items: list[dict], project: str | None) -> list[dict]:
         if kind not in _VALID_KINDS:
             continue
 
-        item["project"] = project or "yadi"
+        item["project"] = project or ""
         item.setdefault("status", "pending")
 
         if kind == "new_fact":
@@ -1156,7 +1159,7 @@ def _enrich_suggestions(items: list[dict], project: str | None) -> list[dict]:
 def _save_suggestion_item(item: dict) -> bool:
     """将一条 AI 建议写入数据库，返回是否成功。"""
     kind    = item.get("kind", "")
-    project = item.get("project", "yadi")
+    project = item.get("project") or ""
     try:
         if kind == "new_fact":
             ftype = item.get("type", "knowledge")
@@ -1210,6 +1213,7 @@ def _save_suggestion_item(item: dict) -> bool:
                 "priority": item.get("priority", ""),
                 "owner":    item.get("owner", ""),
                 "due_date": item.get("due_date", ""),
+                "project":  project,
             })
         return True
     except Exception:
@@ -2541,7 +2545,7 @@ async def _run_review_and_broadcast(mode: str | None = None, project: str = "") 
     proj_pm_ids = _get_project_pm_ids(project)
     recipients = set(ADMIN_OPEN_IDS) | proj_pm_ids
     await _send_review_to_recipients(recipients, _strip_merge_candidates_json(report))
-    review_items = _collect_review_suggestion_items(report)
+    review_items = _collect_review_suggestion_items(report, project)
     merge_count  = sum(1 for x in review_items if x["kind"] == "merge_fact")
     action_count = sum(1 for x in review_items if x["kind"] == "review_action")
     if effective_mode != _REVIEW_MODE_DIRECT:
@@ -2578,7 +2582,7 @@ async def _run_review_all_projects(mode: str | None = None) -> list[tuple[str, s
         recipients = set(ADMIN_OPEN_IDS) | proj_pm_ids
         await _send_review_to_recipients(recipients, _strip_merge_candidates_json(report))
 
-        items = _collect_review_suggestion_items(report)
+        items = _collect_review_suggestion_items(report, name)
         merge_count  = sum(1 for x in items if x["kind"] == "merge_fact")
         action_count = sum(1 for x in items if x["kind"] == "review_action")
         results.append((name, report, merge_count, action_count))

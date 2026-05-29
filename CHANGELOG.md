@@ -33,7 +33,8 @@
 | v1.0.11 | 已部署 | 修复定时早报只发管理员问题：sqlite3.Row 不支持 .get() 导致 PM 循环崩溃被吞；重构早报发送逻辑为每个项目一张卡，admin+NOTIFY+该项目PM收同一张 |
 | v1.1.0 | 已部署 | 洗盘按项目隔离：每次洗盘只处理一个项目数据，报告按项目分开存储；admin 遍历所有活跃项目逐一洗，PM 只洗自己绑定项目 |
 | v1.1.1 | 已部署 | Web 后台管理员接口加权限隔离：/api/ 路由校验飞书 OAuth session，非 super_admin 返回 403 |
-| v1.2.0 | 本地完成 | AI 项目状态汇报独立成命令（/status run + run_status 菜单）；早报卡片改用 AI 生成状态替代静态风险列表；洗盘→状态顺序执行；notify.py 删除内联至 main.py；deploy 脚本更新为用户态 systemd；.env.example 补全 NOTIFY_OPEN_IDS/SESSION_SECRET/ADMIN_REDIRECT_URI |
+| v1.2.0 | 已部署 | AI 项目状态汇报独立成命令（/status run + run_status 菜单）；早报卡片改用 AI 生成状态替代静态风险列表；洗盘→状态顺序执行；notify.py 删除内联至 main.py；deploy 脚本更新为用户态 systemd；.env.example 补全 NOTIFY_OPEN_IDS/SESSION_SECRET/ADMIN_REDIRECT_URI |
+| v1.2.1 | 本地完成 | bug 修复：1) /status run 崩溃——list_users() 返回 sqlite3.Row 不支持 .get()，改为统一返回 dict；2) AI 洗盘新增 todo project 丢失——_apply_review_commands/_apply_review_action/_collect_review_suggestion_items 全链路补传 project 参数；3) 存量 project="默认" 的 todo 直接修正到"雅迪"；4) _enrich_suggestions 兜底从 "yadi" 改为 "" 避免写入不存在的项目名 |
 
 ## 已实现功能清单
 

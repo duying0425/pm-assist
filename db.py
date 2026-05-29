@@ -1244,9 +1244,9 @@ def list_users(role: str | None = None, status: str | None = None) -> list:
         params.append(status)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     with get_conn() as conn:
-        return conn.execute(
+        return [dict(r) for r in conn.execute(
             f"SELECT * FROM users {where} ORDER BY role, name", params
-        ).fetchall()
+        ).fetchall()]
 
 
 def get_user_conv_stats() -> dict[str, dict]:
