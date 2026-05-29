@@ -1379,7 +1379,7 @@ async def _handle_card_trigger(event: dict) -> dict:
                     }},
                 }
             db.add_project(proj_name, description, created_by=open_id)
-            db.update_user(open_id, project=proj_name)
+            db.upsert_user(open_id, name=name, role="pm", project=proj_name, status="active")
             await feishu.send_reply_to_user(
                 open_id,
                 f"🎉 你的项目创建申请已通过！\n项目：{proj_name}\n\n"

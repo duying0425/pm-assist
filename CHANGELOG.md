@@ -36,7 +36,8 @@
 | v1.2.0 | 已部署 | AI 项目状态汇报独立成命令（/status run + run_status 菜单）；早报卡片改用 AI 生成状态替代静态风险列表；洗盘→状态顺序执行；notify.py 删除内联至 main.py；deploy 脚本更新为用户态 systemd；.env.example 补全 NOTIFY_OPEN_IDS/SESSION_SECRET/ADMIN_REDIRECT_URI |
 | v1.2.1 | 已部署 | bug 修复：1) /status run 崩溃——list_users() 返回 sqlite3.Row 不支持 .get()，改为统一返回 dict；2) AI 洗盘新增 todo project 丢失——_apply_review_commands/_apply_review_action/_collect_review_suggestion_items 全链路补传 project 参数；3) 存量 project="默认" 的 todo 直接修正到"雅迪"；4) _enrich_suggestions 兜底从 "yadi" 改为 "" 避免写入不存在的项目名 |
 | v1.3.0 | 已部署 | 参数化配置：Web 后台新增「配置」标签页，11 个运行参数分 4 组（AI 模型、AI 洗盘、AI 上下文、系统）可在线热改；通用 GET/PATCH /api/settings/{key} 接口；ai_model/chat_max_tokens/chat_timeout/review_max_tokens/review_timeout/todo_open_limit/todo_done_limit/todo_done_days/max_history/pending_ttl 全部从 DB 读取，修改后下次请求即生效，无需重启 |
-| v1.3.1 | 本地完成 | Web 后台三项修复/改进：1) 「配置」tab 对 PM 隐藏（仅 super_admin 可见，API 层已有 403，补全 UI 层）；2) 知识库/待办/用户/预设 toolbar 显示当前筛选条数；3) 修复非概览页入口时项目下拉列表为空的 bug（init 预加载条件错误地依赖 editId，去掉该前提） |
+| v1.3.1 | 已部署 | Web 后台三项修复/改进：1) 「配置」tab 对 PM 隐藏（仅 super_admin 可见，API 层已有 403，补全 UI 层）；2) 知识库/待办/用户/预设 toolbar 显示当前筛选条数；3) 修复非概览页入口时项目下拉列表为空的 bug（init 预加载条件错误地依赖 editId，去掉该前提） |
+| v1.3.2 | 本地完成 | 修复新建项目审批漏洞：approve_project 回调用 update_user（纯 UPDATE）替换 upsert_user，导致申请人没有 DB 记录时操作静默失效，用户审批通过后无法获得 pm 权限和项目绑定；改为 upsert_user 并补全 role=pm / status=active |
 
 ## 已实现功能清单
 
