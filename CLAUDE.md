@@ -474,7 +474,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - **`db.py` 查询函数须返回 `dict`**：`sqlite3.Row` 对象不支持 `.get()`，凡是 `fetchall()` 的函数若外部代码用 `.get()` 访问字段，必须加 `[dict(r) for r in ...]` 转换；`fetchone()` 用 `dict(row) if row else None`。`list_users()` 已修复（v1.2.1），新增查询函数注意遵守同一规范
 
 ## 服务器当前状态
-- **当前版本：v1.3.3（已部署）**
+- **当前版本：v1.3.4（已部署）**
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（飞书 OAuth 认证，super_admin / pm 可访问）
 - Web 后台头部显示当前版本号（`/api/version` 接口读取 VERSION 文件）
 - Web 后台支持完整 URL 路由：tab 切换和编辑框均同步地址栏，支持浏览器前进/后退，可直接分享 `?tab=facts&edit=82` 深链

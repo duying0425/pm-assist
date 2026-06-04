@@ -39,6 +39,7 @@
 | v1.3.1 | 已部署 | Web 后台三项修复/改进：1) 「配置」tab 对 PM 隐藏（仅 super_admin 可见，API 层已有 403，补全 UI 层）；2) 知识库/待办/用户/预设 toolbar 显示当前筛选条数；3) 修复非概览页入口时项目下拉列表为空的 bug（init 预加载条件错误地依赖 editId，去掉该前提） |
 | v1.3.2 | 本地完成 | 修复新建项目审批漏洞：approve_project 回调用 update_user（纯 UPDATE）替换 upsert_user，导致申请人没有 DB 记录时操作静默失效，用户审批通过后无法获得 pm 权限和项目绑定；改为 upsert_user 并补全 role=pm / status=active |
 | v1.3.3 | 已部署 | 群聊引用消息支持：PM 引用他人消息并 @Bot 时，自动读取 parent_id/root_id 对应的被引用消息，连同引用发送人、发送时间、引用内容和 PM 当前补充/指令一起送给 AI；纯引用无补充也会进入 AI；日志补充 message_id/parent_id/root_id 和引用详情 |
+| v1.3.4 | 已部署 | 热修引用消息 mentions 解析：飞书 get message 接口返回的 mentions[].id 是字符串 + id_type，接收事件里的 mentions[].id 是 open_id/user_id/union_id 对象；解析逻辑改为同时兼容两种结构，避免引用消息处理崩溃 |
 
 ## 已实现功能清单
 

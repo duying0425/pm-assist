@@ -1819,6 +1819,18 @@ def _message_type(message: dict) -> str:
     return message.get("message_type") or message.get("msg_type") or ""
 
 
+def _mention_open_id(mention) -> str:
+    if not isinstance(mention, dict):
+        return ""
+    mention_id = mention.get("id")
+    if isinstance(mention_id, dict):
+        return mention_id.get("open_id", "")
+    if isinstance(mention_id, str):
+        id_type = mention.get("id_type", "open_id")
+        return mention_id if id_type in ("", "open_id") else ""
+    return ""
+
+
 def _extract_message_text(message: dict) -> str:
     msg_type = _message_type(message)
     raw = _decode_message_content(_message_content_payload(message))
@@ -1846,7 +1858,9 @@ def _extract_message_text(message: dict) -> str:
             para_texts.append("".join(inline))
         text = "\n".join(para_texts).strip()
         for mention in message.get("mentions", []):
-            open_id = mention.get("id", {}).get("open_id", "")
+            if not isinstance(mention, dict):
+                continue
+            open_id = _mention_open_id(mention)
             name = mention.get("name", "")
             if open_id and name and open_id != BOT_OPEN_ID:
                 db.upsert_person(open_id, name)
@@ -1855,10 +1869,12 @@ def _extract_message_text(message: dict) -> str:
     if msg_type == "text":
         text = raw.get("text", "").strip()
         for mention in message.get("mentions", []):
+            if not isinstance(mention, dict):
+                continue
             key = mention.get("key", "")
             if not key:
                 continue
-            open_id = mention.get("id", {}).get("open_id", "")
+            open_id = _mention_open_id(mention)
             if open_id == BOT_OPEN_ID:
                 text = text.replace(key, "").strip()
             else:
@@ -1975,7 +1991,7 @@ async def _handle_message(event: dict):
 
     # 群聊中只响应 @Bot 的消息
     if chat_type == "group":
-        mention_open_ids = {m.get("id", {}).get("open_id", "") for m in message.get("mentions", [])}
+        mention_open_ids = {_mention_open_id(m) for m in message.get("mentions", [])}
         if BOT_OPEN_ID:
             bot_mentioned = BOT_OPEN_ID in mention_open_ids
         else:
