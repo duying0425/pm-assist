@@ -1797,6 +1797,161 @@ async def _handle_text_confirmation(chat_id: str, text: str) -> bool:
     return True
 
 
+def _decode_message_content(content) -> dict:
+    if isinstance(content, dict):
+        return content
+    if not content:
+        return {}
+    try:
+        return json.loads(content)
+    except Exception:
+        return {"text": str(content)}
+
+
+def _message_content_payload(message: dict):
+    if "content" in message:
+        return message.get("content", "")
+    body = message.get("body") or {}
+    return body.get("content", "")
+
+
+def _message_type(message: dict) -> str:
+    return message.get("message_type") or message.get("msg_type") or ""
+
+
+def _extract_message_text(message: dict) -> str:
+    msg_type = _message_type(message)
+    raw = _decode_message_content(_message_content_payload(message))
+
+    if msg_type == "post":
+        # 飞书 post 消息：直接是 {"title":..., "content":[...]}，无语言包装层
+        # content 外层为段落数组，内层为行内节点；段落间用 \n 分隔保留排版
+        post_body = raw.get("zh_cn") or raw.get("en_us") or raw
+        para_texts = []
+        for paragraph in post_body.get("content", []):
+            inline = []
+            for node in paragraph:
+                tag = node.get("tag", "")
+                if tag == "text":
+                    inline.append(node.get("text", ""))
+                elif tag == "at":
+                    uid = node.get("user_id", "")
+                    uname = node.get("user_name", "")
+                    if uid != BOT_OPEN_ID:
+                        if uid and uname:
+                            db.upsert_person(uid, uname)
+                        inline.append(f"@{uname}" if uname else "")
+                elif tag == "a":
+                    inline.append(node.get("text", ""))
+            para_texts.append("".join(inline))
+        text = "\n".join(para_texts).strip()
+        for mention in message.get("mentions", []):
+            open_id = mention.get("id", {}).get("open_id", "")
+            name = mention.get("name", "")
+            if open_id and name and open_id != BOT_OPEN_ID:
+                db.upsert_person(open_id, name)
+        return text
+
+    if msg_type == "text":
+        text = raw.get("text", "").strip()
+        for mention in message.get("mentions", []):
+            key = mention.get("key", "")
+            if not key:
+                continue
+            open_id = mention.get("id", {}).get("open_id", "")
+            if open_id == BOT_OPEN_ID:
+                text = text.replace(key, "").strip()
+            else:
+                name = mention.get("name", "")
+                if open_id and name:
+                    db.upsert_person(open_id, name)
+                text = text.replace(key, f"@{name}" if name else "").strip()
+        return text
+
+    return ""
+
+
+def _referenced_message_id(message: dict) -> str:
+    current_message_id = message.get("message_id", "")
+    for key in ("parent_id", "root_id"):
+        message_id = message.get(key, "")
+        if message_id and message_id != current_message_id:
+            return message_id
+    return ""
+
+
+def _message_sender_open_id(message: dict) -> str:
+    sender = message.get("sender", {})
+    sender_id = sender.get("sender_id") or {}
+    return (
+        sender_id.get("open_id", "")
+        or sender.get("open_id", "")
+        or (sender.get("id", "") if sender.get("id_type") == "open_id" else "")
+    )
+
+
+async def _message_sender_label(message: dict) -> str:
+    sender = message.get("sender", {})
+    sender_id = sender.get("sender_id") or {}
+    open_id = _message_sender_open_id(message)
+    name = sender_id.get("name", "") or sender.get("name", "")
+    if not name and open_id:
+        cached_user = db.get_user(open_id)
+        name = (cached_user or {}).get("name", "")
+    if not name and open_id:
+        name = await feishu.get_user_name(open_id, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    if name and open_id:
+        db.upsert_person(open_id, name)
+        return f"{name}（open_id: {open_id}）"
+    return name or open_id or "未知用户"
+
+
+def _format_feishu_time(value) -> str:
+    if not value:
+        return ""
+    try:
+        timestamp = int(value)
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp / 1000
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(value)
+
+
+async def _build_reference_context(message: dict) -> str:
+    ref_message_id = _referenced_message_id(message)
+    if not ref_message_id:
+        return ""
+
+    quoted = await feishu.get_message(ref_message_id, FEISHU_APP_ID, FEISHU_APP_SECRET)
+    if not quoted:
+        log.warning("referenced message not found parent_id=%s", ref_message_id)
+        return "【被引用消息】\n（无法读取被引用消息内容）"
+
+    quoted_text = _extract_message_text(quoted)
+    if not quoted_text:
+        quoted_text = f"（{_message_type(quoted) or 'unknown'} 消息，暂不支持提取正文或正文为空）"
+    if len(quoted_text) > 4000:
+        quoted_text = quoted_text[:4000] + "\n...（引用内容过长，已截断）"
+
+    sender_label = await _message_sender_label(quoted)
+    create_time = _format_feishu_time(quoted.get("create_time"))
+    time_line = f"\n发送时间：{create_time}" if create_time else ""
+    log.info(
+        "referenced parent_id=%s sender=%s msg_type=%s text=%r",
+        ref_message_id, _message_sender_open_id(quoted), _message_type(quoted), quoted_text[:500],
+    )
+    return f"【被引用消息】\n发送人：{sender_label}{time_line}\n内容：\n{quoted_text}"
+
+
+def _compose_ai_user_text(text: str, reference_context: str) -> str:
+    text = (text or "").strip()
+    if not reference_context:
+        return text
+    current_part = text or "（无补充，仅引用消息并 @机器人）"
+    return f"{reference_context}\n\n【当前发送人的补充/指令】\n{current_part}"
+
+
 async def _handle_message(event: dict):
     message = event.get("message", {})
     sender = event.get("sender", {})
@@ -1806,7 +1961,16 @@ async def _handle_message(event: dict):
     chat_type = message.get("chat_type", "")
     sender_open_id = sender.get("sender_id", {}).get("open_id", "")
 
-    log.info("chat_id=%s sender=%s msg_type=%s chat_type=%s", chat_id, sender_open_id, msg_type, chat_type)
+    log.info(
+        "chat_id=%s sender=%s msg_type=%s chat_type=%s message_id=%s parent_id=%s root_id=%s",
+        chat_id,
+        sender_open_id,
+        msg_type,
+        chat_type,
+        message.get("message_id", ""),
+        message.get("parent_id", ""),
+        message.get("root_id", ""),
+    )
     db.record_user_chat(sender_open_id, chat_id)
 
     # 群聊中只响应 @Bot 的消息
@@ -1823,60 +1987,14 @@ async def _handle_message(event: dict):
     if msg_type not in ("text", "post"):
         return
 
-    raw = json.loads(message.get("content", "{}"))
-
-    if msg_type == "post":
-        # 飞书 post 消息：直接是 {"title":..., "content":[...]}，无语言包装层
-        # content 外层为段落数组，内层为行内节点；段落间用 \n 分隔保留排版
-        post_body = raw.get("zh_cn") or raw.get("en_us") or raw
-        para_texts = []
-        for paragraph in post_body.get("content", []):
-            inline = []
-            for node in paragraph:
-                tag = node.get("tag", "")
-                if tag == "text":
-                    inline.append(node.get("text", ""))
-                elif tag == "at":
-                    uid  = node.get("user_id", "")
-                    uname = node.get("user_name", "")
-                    if uid != BOT_OPEN_ID:
-                        if uid and uname:
-                            db.upsert_person(uid, uname)
-                        inline.append(f"@{uname}" if uname else "")
-                elif tag == "a":
-                    inline.append(node.get("text", ""))
-                # img 等其他 tag 跳过
-            para_texts.append("".join(inline))
-        text = "\n".join(para_texts).strip()
-        # 去掉 post 消息开头的 @Bot（飞书群里 @Bot 会在富文本首节点）
-        # 注：post 消息的 mentions 字段与 text 消息相同
-        # 缓存 post 消息 mentions 里的人员信息（key替换已在 at 节点处理，此处只做缓存）
-        for mention in message.get("mentions", []):
-            open_id = mention.get("id", {}).get("open_id", "")
-            name = mention.get("name", "")
-            if open_id and name and open_id != BOT_OPEN_ID:
-                db.upsert_person(open_id, name)
-    else:
-        text = raw.get("text", "").strip()
-        for mention in message.get("mentions", []):
-            key = mention.get("key", "")
-            if not key:
-                continue
-            open_id = mention.get("id", {}).get("open_id", "")
-            if open_id == BOT_OPEN_ID:
-                # Bot @mention：直接剥除，不留占位文字
-                text = text.replace(key, "").strip()
-            else:
-                name = mention.get("name", "")
-                if open_id and name:
-                    db.upsert_person(open_id, name)
-                text = text.replace(key, f"@{name}" if name else "").strip()
+    text = _extract_message_text(message)
 
     # 通过飞书消息中的发送者信息获取姓名
     sender_name = sender.get("sender_id", {}).get("name", "") or ""
 
-    log.info("text: %r", text)
-    if not text:
+    reference_context = await _build_reference_context(message)
+    log.info("text: %r reference=%s", text, bool(reference_context))
+    if not text and not reference_context:
         return
 
     # 获取/初始化用户信息
@@ -2042,15 +2160,17 @@ async def _handle_message(event: dict):
 
     # ── AI 对话（member/pm/super_admin 均可，上下文深度不同）──
 
+    ai_text = _compose_ai_user_text(text, reference_context)
+
     # 若有待处理澄清问题，把上下文拼入用户消息，然后清除
     pending_clarify = db.get_pending_clarify(chat_id)
     if pending_clarify:
         db.clear_pending_clarify(chat_id)
         clarify_ctx = pending_clarify.get("context", "")
         if clarify_ctx:
-            text = f"[补充信息：{text}]（关于之前的问题：{clarify_ctx}）"
+            ai_text = f"[补充信息：{ai_text}]（关于之前的问题：{clarify_ctx}）"
 
-    db.add_message(chat_id, "user", text)
+    db.add_message(chat_id, "user", ai_text)
     history = db.get_history(chat_id, int(db.get_setting("max_history", str(MAX_HISTORY))))
     context = db.get_full_context(project)
     if user_role == "super_admin":
@@ -2122,7 +2242,7 @@ async def _handle_message(event: dict):
         question = clarify_data.get("q", "")
         opts     = clarify_data.get("opts", [])
         if question:
-            db.save_pending_clarify(chat_id, question, context=text)
+            db.save_pending_clarify(chat_id, question, context=ai_text)
             clarify_card = feishu.build_clarify_card(
                 question, opts, chat_id, sender_open_id=sender_open_id
             )

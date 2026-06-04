@@ -191,6 +191,38 @@ async def get_user_name(open_id: str, app_id: str, app_secret: str) -> str:
         return ""
 
 
+async def get_message(message_id: str, app_id: str, app_secret: str) -> dict | None:
+    """Fetch a Feishu message by message_id."""
+    if not message_id:
+        return None
+    try:
+        token = await get_tenant_token(app_id, app_secret)
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{FEISHU_BASE}/im/v1/messages/{message_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"user_id_type": "open_id"},
+            )
+        data = resp.json()
+        if resp.status_code != 200 or data.get("code", 0) != 0:
+            log.warning(
+                "get_message failed message_id=%s status=%s code=%s msg=%s",
+                message_id, resp.status_code, data.get("code"), data.get("msg"),
+            )
+            return None
+        payload = data.get("data", {})
+        items = payload.get("items")
+        if isinstance(items, list):
+            return items[0] if items else None
+        item = payload.get("item")
+        if isinstance(item, dict):
+            return item
+        return payload if payload.get("message_id") else None
+    except Exception:
+        log.exception("get_message error message_id=%s", message_id)
+        return None
+
+
 def _split(text: str, limit: int) -> list[str]:
     if len(text) <= limit:
         return [text]
