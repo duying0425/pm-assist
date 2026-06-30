@@ -51,15 +51,17 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 ## 代码结构
 ```
 pm-assist/
+├── README.md        # 项目主说明文档（定位、架构、安装与部署说明）
+├── CLAUDE.md        # 面向开发者的系统架构、接口规范与运维手册
+├── PM手册.md        # 面向 PM 用户的操作手册（命令速查、使用场景说明，随功能更新同步维护）
+├── CHANGELOG.md     # 版本部署记录（每次发版更新）
+├── VERSION          # 版本号文件，格式 x.y.z
 ├── main.py          # FastAPI 主入口，Webhook 处理，管理员命令，卡片回调，/todo 命令
 ├── ai_client.py # AI 对话(chat) + 洗盘(nightly_review) + 分解(decompose_risk)
 ├── feishu.py        # 飞书 API：send_reply/send_reply_to_user（统一出口）、所有卡片 builder、卡片响应格式
 ├── db.py            # SQLite CRUD：四层数据（assumptions/org_units/facts/todos）+ 用户/项目
 ├── web_admin.py     # Web 管理后台 REST API（FastAPI Router，挂载于 /admin）
 ├── config.py        # 环境变量加载（从 .env 读取）
-├── VERSION          # 版本号文件，格式 x.y.z
-├── CHANGELOG.md     # 版本部署记录（每次发版更新）
-├── PM手册.md        # 面向 PM 用户的操作手册（命令速查、使用场景说明，随功能更新同步维护）
 ├── static/
 │   └── admin.html   # Web 管理后台单页 UI（纯 HTML/CSS/JS，无外部依赖）
 ├── deploy/
