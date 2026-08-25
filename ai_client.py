@@ -88,13 +88,21 @@ _ADMIN_EXTRA = """
 - conversations: 对话历史（chat_id, role, content）
 当前 AI 上下文已注入全部 active 条目详情，管理员也可使用 /admin 系列命令查询实际数据。"""
 
+_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+
+def _today_str() -> str:
+    now = datetime.now()
+    return f"{now.strftime('%Y-%m-%d')}（{_WEEKDAYS[now.weekday()]}）"
+
+
 # 成员版角色说明（轻量，不涉及PM专属工作流）
 _ROLE_MEMBER = """你是东软睿驰自动驾驶团队的内部助手。你可以回答关于团队、项目背景、工作流程的问题，提供一般性建议。
 回答风格：简洁友好，聚焦团队和项目背景知识，不涉及PM内部工作细节。"""
 
 _CONTEXT_TEMPLATE = """{role}
 
-{sender_section}{dept_section}{project_section}{users_section}{todos_section}{risk_section}{schedule_section}{decision_section}{ref_section}"""
+{time_section}{sender_section}{dept_section}{project_section}{users_section}{todos_section}{risk_section}{schedule_section}{decision_section}{ref_section}"""
 
 
 def _build_system(context: dict, sender_info: str = "", role: str = "pm") -> str:
@@ -121,6 +129,7 @@ def _build_system(context: dict, sender_info: str = "", role: str = "pm") -> str
         risk_section     = section("当前活跃风险与问题", context.get("risks") or "（暂无已登记风险）")
         decision_section = section("关键决策记录", context.get("decisions", ""))
 
+    time_section     = section("当前系统时间", f"今天是 {_today_str()}。所有日期推算、超期判断、待办建议 due_date 均以此基准日期为准。")
     sender_section   = section("当前对话用户", sender_info) if sender_info else ""
     dept_section     = section("部门预设（团队公认背景知识）", context.get("dept_assumptions", ""))
     project_section  = section("当前项目背景", context.get("project_assumptions", ""))
@@ -129,6 +138,7 @@ def _build_system(context: dict, sender_info: str = "", role: str = "pm") -> str
 
     return _CONTEXT_TEMPLATE.format(
         role=base_role,
+        time_section=time_section,
         sender_section=sender_section,
         dept_section=dept_section,
         project_section=project_section,
@@ -224,7 +234,7 @@ async def generate_project_status(project: str) -> str:
     if not facts_text:
         return f"「{project}」项目暂无活跃数据。"
     count = facts_text.count("\n  标题:")
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _today_str()
     prompt = _PROJECT_STATUS_PROMPT_TPL.format(
         today=today, project=project, count=count, facts_text=facts_text
     )
@@ -239,7 +249,7 @@ async def generate_project_status(project: str) -> str:
 
 async def nightly_review(facts_text: str) -> str:
     count = facts_text.count("\n  标题:")
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _today_str()
     prompt = _REVIEW_PROMPT_TPL.format(today=today, count=count, facts_text=facts_text)
     try:
         response = await _client.chat.completions.create(
@@ -273,7 +283,7 @@ async def nightly_review(facts_text: str) -> str:
 
 
 
-_DECOMPOSE_PROMPT = """你是项目管理专家。将以下风险/问题分解为2-6条具体可执行的待办事项。
+_DECOMPOSE_PROMPT_TPL = """你是项目管理专家。今天是 {today}，将以下风险/问题分解为2-6条具体可执行的待办事项。
 
 要求：
 - 每条必须是一个具体行动（动词开头），不是风险描述的重复
@@ -282,7 +292,7 @@ _DECOMPOSE_PROMPT = """你是项目管理专家。将以下风险/问题分解�
 - body 写执行说明或注意事项，无特殊要求可留空
 
 返回格式（仅 JSON，不要其他内容）：
-{"todos": [{"title": "...", "body": "...", "priority": "medium", "owner": ""}]}
+{{"todos": [{{"title": "...", "body": "...", "priority": "medium", "owner": ""}}]}}
 
 风险/问题：
 """
@@ -298,11 +308,13 @@ async def decompose_risk(fact: dict) -> list[dict]:
         f"负责人：{fact.get('owner', '') or '—'}\n"
         f"正文：{fact['body']}"
     )
+    today = _today_str()
+    prompt = _DECOMPOSE_PROMPT_TPL.format(today=today) + fact_text
     try:
         response = await _client.chat.completions.create(
             model=_model(),
             max_tokens=2000,
-            messages=[{"role": "user", "content": _DECOMPOSE_PROMPT + fact_text}],
+            messages=[{"role": "user", "content": prompt}],
         )
         raw = response.choices[0].message.content.strip()
         if raw.startswith("```"):

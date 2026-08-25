@@ -230,6 +230,7 @@ name / description / created_by / active / updated_at
 
 ```
 [静态] 角色定义（PM助手职责 + 语言约束：不说"已记录/已保存"）
+[时间] 当前系统时间（日期与星期，作为基准时间）
 [L0]   部门预设假设（铁律/通识，scope=dept/global）
 [L1]   项目专属假设（scope=project）
 [T]    待办事项（open todos + 近14天已完成，带追溯和时间）
