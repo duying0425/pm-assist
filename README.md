@@ -155,7 +155,6 @@ uvicorn main:app --host 127.0.0.1 --port 8000 --reload
    # 或者是查看追加日志文件
    tail -f ~/pm-assist/logs/app.log
    ```
-5. **CDN/EdgeOne 运维要点**：`pm.tmhcorps.cn` 经腾讯 EdgeOne 加速回源本机 nginx（仅 80 端口）。若 https 全站报 521/525，优先排查 EdgeOne 控制台「回源协议」是否为 **HTTP + 80**（回源 HTTPS 而 nginx 无 443 监听即 525）。
 
 ---
 
