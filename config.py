@@ -1,3 +1,4 @@
+import json
 import os
 import secrets
 from dotenv import load_dotenv
@@ -20,3 +21,11 @@ MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
 SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_hex(32)
 # 飞书 OAuth 回调地址，需与飞书开放平台配置一致
 ADMIN_REDIRECT_URI = os.getenv("ADMIN_REDIRECT_URI", "https://pm.tmhcorps.cn/admin/oauth/callback")
+
+# ── 认证跳板 Hub（hub_main.py 独立进程使用；业务进程忽略）──
+# Hub 对外回调地址，需在飞书开放平台「安全设置-重定向URL」中添加
+HUB_CALLBACK_URI = os.getenv("HUB_CALLBACK_URI", "https://pm.tmhcorps.cn/hub/callback")
+# state 签名密钥，未配置时复用 SESSION_SECRET
+HUB_SECRET = os.getenv("HUB_SECRET") or SESSION_SECRET
+# 接入应用注册表：[{"id","secret","redirect_uri","scopes"}]
+HUB_CLIENTS = json.loads(os.environ["HUB_CLIENTS"]) if os.getenv("HUB_CLIENTS") else []

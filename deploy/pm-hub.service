@@ -1,0 +1,15 @@
+[Unit]
+Description=PM Assist Auth Hub
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/pm-assist
+ExecStart=%h/pm-assist/venv/bin/uvicorn hub_main:app --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/pm-assist/logs/hub.log
+StandardError=append:%h/pm-assist/logs/hub.log
+
+[Install]
+WantedBy=default.target
