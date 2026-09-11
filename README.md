@@ -41,6 +41,10 @@
    * 挂载于 `/admin`，基于**飞书 OAuth** 进行登录与权限隔离。
    * 支持可视化的知识库管理、待办编辑、用户审批与角色配置、运行参数在线热改（AI模型、超时限制、洗盘参数等）。
 
+7. **认证跳板 (Auth Hub)**
+   * 内置 OAuth 认证中心，兄弟应用（如 chatlogger）无需在飞书平台自建应用，复用本应用凭证完成授权。
+   * **权限审批只做一次**：新应用接入 = `.env` 加一行注册，飞书侧零配置。详见 [认证跳板方案.md](认证跳板方案.md)。
+
 ---
 
 ## 🛠️ 四层数据架构
@@ -63,6 +67,8 @@
 ```text
 pm-assist/
 ├── main.py             # FastAPI 主入口、Webhook 路由、飞书卡片回调处理
+├── auth_hub.py         # 认证跳板路由：/hub/authorize、/hub/callback 及 token 换发 API
+├── hub_main.py         # 认证跳板独立入口（同仓库独立进程，默认 8002 端口）
 ├── ai_client.py        # AI 对话、智能洗盘(Nightly Review)与风险分解逻辑
 ├── feishu.py           # 飞书 API 封装与所有交互式卡片 Builder (Schema 2.0)
 ├── db.py               # SQLite 数据库 CRUD 封装与四层上下文组装
@@ -72,11 +78,14 @@ pm-assist/
 ├── CHANGELOG.md        # 详细的开发与发版历史记录
 ├── PM手册.md           # 面向 PM 用户的飞书命令速查与典型场景使用手册
 ├── CLAUDE.md           # 面向开发者的系统架构、接口规范与运维手册
+├── 认证跳板方案.md      # 认证跳板（Auth Hub）的设计方案与接入指南
 ├── static/
 │   └── admin.html      # 单页管理后台 UI (纯 HTML/CSS/JS)
 ├── deploy/
 │   ├── nginx.conf      # Nginx 反向代理配置模板
-│   ├── pm-assist.service # Systemd 用户态服务配置文件
+│   ├── apps.conf       # 线上 Nginx 实际配置归档（含 /hub/ → 8002 转发）
+│   ├── pm-assist.service # Systemd 用户态服务配置文件（业务进程）
+│   ├── pm-hub.service  # Systemd 用户态服务配置文件（认证跳板进程）
 │   ├── setup.sh        # 服务器环境一键初始化脚本
 │   └── start.sh        # 服务快捷启动/重启脚本
 └── backups/            # 每日自动数据库备份目录 (保留最近 7 份)
@@ -125,22 +134,28 @@ uvicorn main:app --host 127.0.0.1 --port 8000 --reload
    ```bash
    # SSH 登录服务器
    ssh aliyun
-   
+
    # 执行部署脚本进行环境初始化（需要临时 sudo 安装 python3-venv 和 nginx）
    bash ~/pm-assist/deploy/setup.sh
+
+   # 启用认证跳板独立进程（8002 端口，与业务进程互不影响）
+   cp ~/pm-assist/deploy/pm-hub.service ~/.config/systemd/user/
+   systemctl --user daemon-reload && systemctl --user enable --now pm-hub
    ```
-3. **日常代码更新与重启**：
+3. **日常代码更新与重启**（服务器目录为 git 仓库）：
    ```bash
-   # 在本地通过 scp 上传更新的文件（注意：使用正斜杠路径避免 Windows 环境 scp 静默失败）
-   # 之后在服务器端运行：
-   systemctl --user restart pm-assist
+   ssh aliyun "cd ~/pm-assist && git pull && systemctl --user restart pm-assist"
+   # 认证跳板有变更时（通常没有）：
+   ssh aliyun "systemctl --user restart pm-hub"
    ```
 4. **日志查看**：
    ```bash
    journalctl --user -u pm-assist -f
+   journalctl --user -u pm-hub -f     # 认证跳板
    # 或者是查看追加日志文件
    tail -f ~/pm-assist/logs/app.log
    ```
+5. **CDN/EdgeOne 运维要点**：`pm.tmhcorps.cn` 经腾讯 EdgeOne 加速回源本机 nginx（仅 80 端口）。若 https 全站报 521/525，优先排查 EdgeOne 控制台「回源协议」是否为 **HTTP + 80**（回源 HTTPS 而 nginx 无 443 监听即 525）。
 
 ---
 
