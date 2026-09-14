@@ -1,0 +1,25 @@
+{
+  "_readme": [
+    "认证跳板配置：改动即时生效，无需重启 pm-hub。",
+    "scopes：所有接入应用统一申请的用户授权权限（全局一份）；按你自己飞书应用「权限管理」里已开通的用户授权权限填写，混入未开通项会导致授权页报 20027；飞书单次授权上限 200 个。",
+    "clients：接入应用注册表，新增应用加一项即可。secret 为接入方与 hub 之间的凭证，与飞书无关。"
+  ],
+  "scopes": [
+    "im:message",
+    "im:message.group_msg:get_as_user",
+    "im:chat",
+    "bitable:app",
+    "docx:document",
+    "wiki:wiki",
+    "docs:document.media:download",
+    "drive:drive.metadata:readonly",
+    "offline_access"
+  ],
+  "clients": [
+    {
+      "id": "chatlogger",
+      "secret": "换成随机密钥",
+      "redirect_uri": "https://chatlogger.tmhcorps.cn/auth/callback"
+    }
+  ]
+}

@@ -1,4 +1,3 @@
-import json
 import os
 import secrets
 from dotenv import load_dotenv
@@ -27,5 +26,4 @@ ADMIN_REDIRECT_URI = os.getenv("ADMIN_REDIRECT_URI", "https://pm.tmhcorps.cn/adm
 HUB_CALLBACK_URI = os.getenv("HUB_CALLBACK_URI", "https://pm.tmhcorps.cn/hub/callback")
 # state 签名密钥，未配置时复用 SESSION_SECRET
 HUB_SECRET = os.getenv("HUB_SECRET") or SESSION_SECRET
-# 接入应用注册表：[{"id","secret","redirect_uri","scopes"}]
-HUB_CLIENTS = json.loads(os.environ["HUB_CLIENTS"]) if os.getenv("HUB_CLIENTS") else []
+# 接入应用注册表与全局授权 scope 见 hub_config.json（热加载，改动免重启）

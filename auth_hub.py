@@ -8,17 +8,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import secrets
 import time
 import urllib.parse
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 import feishu
-from config import FEISHU_APP_ID, FEISHU_APP_SECRET, HUB_CALLBACK_URI, HUB_CLIENTS, HUB_SECRET
+from config import FEISHU_APP_ID, FEISHU_APP_SECRET, HUB_CALLBACK_URI, HUB_SECRET
 
 log = logging.getLogger("auth_hub")
 router = APIRouter(prefix="/hub")
@@ -30,15 +32,34 @@ _FEISHU_USER_INFO = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 _STATE_TTL = 600      # 授权跳转 state 有效期（秒）
 _AUTH_CODE_TTL = 300  # 一次性 auth_code 有效期（秒）
 
-_clients: dict[str, dict] = {c["id"]: c for c in HUB_CLIENTS}
+# hub 配置文件：全局授权 scope + client 注册表，每次请求现读，改动免重启
+_HUB_CONFIG_FILE = Path(__file__).with_name("hub_config.json")
+
 # 一次性 auth_code -> 换发结果，用后即删；单进程部署故存内存即可
 _auth_codes: dict[str, dict] = {}
+
+
+def load_hub_config() -> dict:
+    try:
+        cfg = json.loads(_HUB_CONFIG_FILE.read_text(encoding="utf-8"))
+        if not isinstance(cfg.get("scopes"), list) or not cfg["scopes"]:
+            raise ValueError("scopes 必须为非空数组")
+        if not isinstance(cfg.get("clients"), list) or not cfg["clients"]:
+            raise ValueError("clients 必须为非空数组")
+    except (OSError, ValueError) as e:
+        log.error("hub_config.json 加载失败: %s", e)
+        raise HTTPException(status_code=500, detail="hub 配置加载失败，请检查 hub_config.json")
+    return cfg
+
+
+def _clients(cfg: dict) -> dict:
+    return {c["id"]: c for c in cfg["clients"]}
 
 
 # ── client 凭证校验 ──────────────────────────────────────────
 
 def _require_client(data: dict) -> dict:
-    c = _clients.get(str(data.get("client_id", "")))
+    c = _clients(load_hub_config()).get(str(data.get("client_id", "")))
     if not c or not hmac.compare_digest(
         c["secret"].encode(), str(data.get("client_secret", "")).encode()
     ):
@@ -76,13 +97,14 @@ def _read_state(state: str) -> dict | None:
 
 @router.get("/authorize")
 def hub_authorize(client_id: str = "", state: str = ""):
-    c = _clients.get(client_id)
+    cfg = load_hub_config()
+    c = _clients(cfg).get(client_id)
     if not c:
         raise HTTPException(status_code=404, detail="未注册的接入应用")
     params = urllib.parse.urlencode({
         "client_id": FEISHU_APP_ID,
         "redirect_uri": HUB_CALLBACK_URI,
-        "scope": c["scopes"],
+        "scope": " ".join(cfg["scopes"]),
         "state": _make_state(client_id, state),
     })
     return RedirectResponse(f"{_FEISHU_AUTHORIZE}?{params}")
@@ -93,7 +115,7 @@ async def hub_callback(code: str = "", state: str = "", error: str = ""):
     parsed = _read_state(state)
     if error or not code or not parsed:
         return HTMLResponse("<h3>授权失败，请关闭后重试</h3>", status_code=400)
-    c = _clients.get(parsed["client_id"])
+    c = _clients(load_hub_config()).get(parsed["client_id"])
     if not c:
         return HTMLResponse("<h3>未注册的接入应用</h3>", status_code=400)
 

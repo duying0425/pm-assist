@@ -8,13 +8,14 @@ import logging
 from fastapi import FastAPI
 
 import auth_hub
-from config import HUB_CLIENTS
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-if not HUB_CLIENTS:
-    raise SystemExit("HUB_CLIENTS 未配置或为空，无法启动认证跳板（配置见 .env.example）")
+try:
+    auth_hub.load_hub_config()
+except Exception as e:
+    raise SystemExit(f"hub_config.json 校验失败: {e}")
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(auth_hub.router)

@@ -9,12 +9,23 @@ sed -i 's/^SESSION_SECRE=/SESSION_SECRET=/' .env
 HUB_SECRET=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 CL_SECRET=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
 
+# Hub 接入注册与全局 scope 写入 hub_config.json（热加载，改动免重启）
+cp hub_config.json.example hub_config.json
+python3 - "$CL_SECRET" <<'PYEOF'
+import json, sys
+secret = sys.argv[1]
+with open("hub_config.json", encoding="utf-8") as f:
+    cfg = json.load(f)
+cfg["clients"][0]["secret"] = secret
+with open("hub_config.json", "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PYEOF
+
 cat >> .env <<EOF
 
 # ===== 认证跳板 Hub（2026-09-11 部署）=====
 HUB_SECRET=${HUB_SECRET}
-HUB_CLIENTS=[{"id":"chatlogger","secret":"${CL_SECRET}","redirect_uri":"https://chatlogger.tmhcorps.cn/auth/callback","scopes":"im:message:readonly im:message.group_msg:get_as_user bitable:app im:chat:readonly offline_access docx:document:readonly wiki:wiki:readonly drive:drive:readonly"}]
 EOF
 
 echo "ENV_UPDATED"
-grep -E '^(SESSION_SECRET|HUB_SECRET|HUB_CLIENTS)=' .env | sed 's/=.*/=<set>/'
+grep -E '^(SESSION_SECRET|HUB_SECRET)=' .env | sed 's/=.*/=<set>/'
