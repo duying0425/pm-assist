@@ -1,6 +1,6 @@
 """认证跳板 Hub：兄弟应用复用本应用的飞书凭证完成 OAuth，APP_SECRET 不出本服务。
 
-由 hub_main.py 独立进程运行（127.0.0.1:8001），与 pm-assist 业务进程（8000）隔离，
+由 hub_main.py 独立进程运行（127.0.0.1:8002），与 pm-assist 业务进程（8000）隔离，
 业务发版重启不影响其他应用的认证。对外 URL 恒为 https://pm.tmhcorps.cn/hub/...
 （nginx location /hub/ 转发），飞书侧回调配置永不变化。
 """
