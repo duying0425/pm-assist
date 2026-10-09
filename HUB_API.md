@@ -69,12 +69,13 @@ Windows 调用脚本为 `tools/Get-UserAccessToken.ps1`，与单独提供的 `hu
 - 后台只允许获取 `ADMIN_OPEN_IDS` 中的用户，且来源 client 必须仍在 `hub_config.json` 中注册。
 - 多份授权时返回 `409 account_required`，根据账号信息指定 `client_id`、`open_id`。
 - 账号元数据接口：`POST /hub/api/user-token/accounts`，使用相同后台 API Key，不返回任何 token。
-- 授权失效返回 `409 authorization_required` 和授权入口；用户应在对应接入应用中重新登录。
+- 刷新凭证到期或已使用时返回 `409 authorization_required` 和授权入口；用户应在对应接入应用中重新登录。其他飞书拒绝刷新错误保留为 HTTP 400，见 `detail.code`。
 
 ## 错误响应
 
 | HTTP 状态 | 含义 |
 |---|---|
+| 400 | 飞书拒绝刷新；`detail.code` 保留飞书错误码，需排查应用配置或重新授权 |
 | 401 | 后台 API Key 缺少或错误 |
 | 403 | 指定用户未配置为管理员 |
 | 404 | client 已删除或未注册 |
