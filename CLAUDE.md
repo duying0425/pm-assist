@@ -38,7 +38,7 @@ client = AsyncOpenAI(base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROU
 - 早报推送由 APScheduler 内置于 FastAPI 处理（早报卡片构建逻辑已内联至 main.py，notify.py 已删除）
 
 ## 版本管理
-- 版本号存于 `VERSION` 文件（当前 `1.0.6`），语义化：`major.feature.patch`
+- 版本号存于 `VERSION` 文件（当前 `1.4.0`），语义化：`major.feature.patch`
 - 飞书发 `/version` 可查询当前运行版本
 - 每次部署前修改 `VERSION`，本地 `git tag vX.Y.Z && git push --tags`，scp 时一并上传
 
@@ -477,7 +477,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - **`db.py` 查询函数须返回 `dict`**：`sqlite3.Row` 对象不支持 `.get()`，凡是 `fetchall()` 的函数若外部代码用 `.get()` 访问字段，必须加 `[dict(r) for r in ...]` 转换；`fetchone()` 用 `dict(row) if row else None`。`list_users()` 已修复（v1.2.1），新增查询函数注意遵守同一规范
 
 ## 服务器当前状态
-- **当前已部署版本：v1.3.6；v1.4.0 Hub 后台用户 Token API 待部署**
+- **当前版本：v1.4.0（已部署，2026-10-09）**
 - Web 后台地址：`https://pm.tmhcorps.cn/admin/`（飞书 OAuth 认证，super_admin / pm 可访问）
 - Web 后台头部显示当前版本号（`/api/version` 接口读取 VERSION 文件）
 - Web 后台支持完整 URL 路由：tab 切换和编辑框均同步地址栏，支持浏览器前进/后退，可直接分享 `?tab=facts&edit=82` 深链
@@ -496,6 +496,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - 用户凭证保存在 `data/hub_tokens.sqlite3`（可配置路径，权限 `0600`），需使用 SQLite backup API 随服务备份，不进入 Git。
 - 保持单个 uvicorn 进程，同一用户的授权交付、后台取 token 和原客户端刷新共用续期锁。
 - 测试：`python -m unittest discover -s tests -p 'test_*.py'`。
+- Windows 取 token 脚本：`tools/Get-UserAccessToken.ps1`。配置文件含 API Key，单独提供，不放入 Git。
 
 ## 待开发
 - [x] systemd 自动重启（用户态 systemd 服务，已实现）

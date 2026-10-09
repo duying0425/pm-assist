@@ -50,6 +50,17 @@ $result = Invoke-RestMethod -Method Post `
 $result.user_access_token
 ```
 
+Windows 调用脚本为 `tools/Get-UserAccessToken.ps1`，与单独提供的 `hub_api_config.json` 放在同一目录：
+
+```powershell
+.\Get-UserAccessToken.ps1                 # 获取可用 token，写入 user_access_token.json
+.\Get-UserAccessToken.ps1 -ForceRefresh   # 立即生成新 token 并保存
+```
+
+配置文件中的 `url`、`api_key`、`client_id`、`open_id` 分别为接口地址、后台 API Key、授权来源及用户标识；该文件不进入 Git。
+脚本默认只打印账号、到期时间和保存路径。`-PassThru` 返回完整对象，供其他脚本使用。
+可选 `-Verify` 会从运行脚本的电脑额外调用飞书 user_info 接口，需要该电脑能访问飞书 API。
+
 ## 授权与账号选择
 
 - 首次仍需要用户在接入应用中登录飞书，完成 OAuth 授权；后台 API 不能跳过用户授权。

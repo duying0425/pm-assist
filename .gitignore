@@ -1,6 +1,8 @@
 .env
 *.env
 hub_config.json
+hub_api_config.json
+user_access_token.json
 .claude/
 __pycache__/
 *.pyc
