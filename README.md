@@ -1,12 +1,14 @@
 # PM Assist (飞书智能项目管理助手)
 
-![Version](https://img.shields.io/badge/version-v1.3.4-blue)
+![Version](https://img.shields.io/badge/version-v1.4.0-blue)
 ![Python](https://img.shields.io/badge/python-3.12%2B-green)
 ![Platform](https://img.shields.io/badge/platform-Feishu%20%7C%20Lark-cyan)
 ![Framework](https://img.shields.io/badge/framework-FastAPI-orange)
 ![Database](https://img.shields.io/badge/database-SQLite-lightgrey)
 
 `pm-assist` 是专为**东软睿驰自动驾驶团队**打造的内部飞书项目管理 Bot。它能够无缝融入飞书群聊与单聊，通过自然语言交互，帮助项目经理（PM）及团队成员自动化地整理项目纪要、追踪风险与问题、管理待办事项及里程碑。
+
+认证 Hub 提供后台一键获取 `user_access_token` 的 API，支持自动续期、独立 API Key 和已有授权持久化。接口与运维说明见 [HUB_API.md](HUB_API.md)。
 
 ---
 

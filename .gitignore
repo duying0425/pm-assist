@@ -7,6 +7,7 @@ __pycache__/
 *.pyo
 *.db
 *.sqlite3
+data/hub_tokens.sqlite3*
 *.log
 .venv/
 venv/

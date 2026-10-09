@@ -42,6 +42,15 @@
 | v1.3.4 | 已部署 | 热修引用消息 mentions 解析：飞书 get message 接口返回的 mentions[].id 是字符串 + id_type，接收事件里的 mentions[].id 是 open_id/user_id/union_id 对象；解析逻辑改为同时兼容两种结构，避免引用消息处理崩溃 |
 | v1.3.5 | 已部署 | 统一 AI 场景当前时间注入：新增 _today_str 辅助函数（含 YYYY-MM-DD 及星期），在常规对话（_build_system）、早报状态（generate_project_status）、夜间洗盘（nightly_review）和风险分解（decompose_risk）全场景统一注入当前基准时间 |
 | v1.3.6 | 已部署 | 认证跳板全局授权 + 配置热加载：HUB_CLIENTS 从 .env 迁至 hub_config.json（gitignore，含模板 example），每次请求现读、改 scope/注册新应用免重启；授权 scope 改为全局一份（191 项，从飞书已开通权限导出裁剪至 200 上限内），接入应用复用 pm-assist 已开通权限时 hub 零改动、存量 token 无需重新授权；附带修复全量 scope 授权 302 超出 nginx 默认 4k 响应头缓冲导致公网 502（/hub/ 加 proxy_buffer_size 16k） |
+| v1.4.0 | 待部署 | Hub 后台用户 Token API：独立 API Key、管理员授权筛选、自动/强制续期、凭证持久化和旧客户端兼容 |
+
+## v1.4.0 — Hub 后台用户 Token API（2026-10-09，待部署）
+
+- 新增 `POST /hub/api/user-token`：独立后台 API Key，返回已授权管理员的 `user_access_token`；有效期不足 5 分钟自动续期，也可 `force_refresh=true` 强制续期。
+- 新增 `POST /hub/api/user-token/accounts`：列出已授权管理员的账号元数据，多账号时显式选择。
+- Hub 持久化用户授权与刷新凭证，重启后继续使用；按用户串行续期，旧客户端刷新凭证通过摘要映射获取当前凭证，保持原刷新接口兼容。
+- 保留首次 OAuth 授权要求；刷新授权失效时明确返回重新授权指引。API 响应禁止缓存，日志不写凭证，SQLite 文件权限为 `0600`。
+- 使用说明：[HUB_API.md](HUB_API.md)。
 
 ## 已实现功能清单
 

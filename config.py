@@ -27,3 +27,9 @@ HUB_CALLBACK_URI = os.getenv("HUB_CALLBACK_URI", "https://pm.tmhcorps.cn/hub/cal
 # state 签名密钥，未配置时复用 SESSION_SECRET
 HUB_SECRET = os.getenv("HUB_SECRET") or SESSION_SECRET
 # 接入应用注册表与全局授权 scope 见 hub_config.json（热加载，改动免重启）
+
+# 后台取用户 token：独立 API Key，仅允许 ADMIN_OPEN_IDS 中已授权的账号。
+HUB_ADMIN_API_KEY = os.getenv("HUB_ADMIN_API_KEY", "")
+HUB_TOKEN_DB_PATH = os.getenv(
+    "HUB_TOKEN_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "hub_tokens.sqlite3")
+)

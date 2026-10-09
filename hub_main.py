@@ -14,8 +14,18 @@ logging.basicConfig(level=logging.INFO,
 
 try:
     auth_hub.load_hub_config()
+    auth_hub.token_store()
 except Exception as e:
     raise SystemExit(f"hub_config.json 校验失败: {e}")
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(auth_hub.router)
+
+
+@app.middleware("http")
+async def prevent_token_caching(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/hub/api/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
