@@ -497,6 +497,7 @@ NOTIFY_OPEN_IDS=ou_其他需要收日报的人（非管理员也可收）
 - 保持单个 uvicorn 进程，同一用户的授权交付、后台取 token 和原客户端刷新共用续期锁。
 - 测试：`python -m unittest discover -s tests -p 'test_*.py'`。
 - Windows 取 token 脚本：`tools/Get-UserAccessToken.ps1`。配置文件含 API Key，单独提供，不放入 Git。
+- Aliyun 取 token 脚本：`tools/get_user_access_token.sh`，安装副本在 `~/get_user_access_token.sh`，含中文用法；读取现有 `.env`，输出 `~/user_access_token.json`（`0600`），支持立即更新和飞书身份验证。同步脚本不需要重启服务。
 
 ## 待开发
 - [x] systemd 自动重启（用户态 systemd 服务，已实现）

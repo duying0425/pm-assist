@@ -61,6 +61,30 @@ Windows 调用脚本为 `tools/Get-UserAccessToken.ps1`，与单独提供的 `hu
 脚本默认只打印账号、到期时间和保存路径。`-PassThru` 返回完整对象，供其他脚本使用。
 可选 `-Verify` 会从运行脚本的电脑额外调用飞书 user_info 接口，需要该电脑能访问飞书 API。
 
+## Aliyun 服务器一键脚本
+
+`aliyun-cf` 的用户目录已安装 `~/get_user_access_token.sh`，脚本开头有完整中文说明：
+
+```bash
+~/get_user_access_token.sh                  # 获取并保存到 ~/user_access_token.json
+~/get_user_access_token.sh --force-refresh  # 立即更新 token
+~/get_user_access_token.sh --verify         # 获取后用飞书 user_info 核验身份
+~/get_user_access_token.sh --print-token    # 仅输出 token，方便复制或脚本读取
+~/get_user_access_token.sh --help           # 查看账号选择、输出位置等选项
+```
+
+脚本使用现有 `~/pm-assist/venv`，从 `~/pm-assist/.env` 读取 `HUB_ADMIN_API_KEY`，直接访问本机 Hub 的 `127.0.0.1:8002`。
+密钥不写入脚本；输出 JSON 的权限为 `0600`，默认只显示账号、到期时间和文件位置。获取或验证失败时保留原文件。
+存在多个授权时，用 `--client-id chatlogger --open-id ou_...` 指定账号；迁移项目目录时设置 `PM_ASSIST_DIR`。
+
+Git 中的维护源文件为 `tools/get_user_access_token.sh`，更新后可同步到用户目录：
+
+```bash
+install -m 700 ~/pm-assist/tools/get_user_access_token.sh ~/get_user_access_token.sh
+```
+
+脚本为单独的调用工具，安装或更新脚本无需重启 Hub 或业务服务。
+
 ## 授权与账号选择
 
 - 首次仍需要用户在接入应用中登录飞书，完成 OAuth 授权；后台 API 不能跳过用户授权。
